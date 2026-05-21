@@ -4,18 +4,9 @@ Automatically generate terminal-based programming tasks from StackOverflow quest
 
 ## 1. 🔭 Pipeline Overview
 
-```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  SO Scraper │────▶│  Task Generator  │────▶│  Docker Validator│
-│  (Phase 1)  │     │  (Phase 2)       │     │  (Phase 3)       │
-└─────────────┘     └──────────────────┘     └─────────────────┘
-  Crawl SO            LLM generates:           Build & run in
-  questions           - instruction.md         Docker container,
-  with accepted       - environment/           verify with tests
-  answers             - solution/solve.sh
-                      - tests/
-                      - Dockerfile
-```
+ <p align="center">
+    <img src="./pipeline.jpg" width="600">
+  </p>
 
 ## 2. 🚀 Quick Start
 
