@@ -32,7 +32,7 @@ import requests
 # Configuration (defaults, overridable via CLI/env)
 # ============================================================================
 DEFAULT_API_BASE = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "claude-opus-4-6"
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2

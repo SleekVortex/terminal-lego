@@ -1,8 +1,8 @@
-# Terminal-Lego
+# 🧱 Terminal-Lego
 
 Automatically generate terminal-based programming tasks from StackOverflow questions, with Docker-based validation.
 
-## Pipeline Overview
+## 1. 🔭 Pipeline Overview
 
 ```
 ┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
@@ -17,15 +17,15 @@ Automatically generate terminal-based programming tasks from StackOverflow quest
                       - Dockerfile
 ```
 
-## Quick Start
+## 2. 🚀 Quick Start
 
-### 1. Install dependencies
+### 2.1 Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure
+### 2.2 Configure
 
 ```bash
 cp .env.example .env
@@ -36,9 +36,9 @@ Required environment variables:
 - `OPENAI_API_KEY` — API key for an OpenAI-compatible LLM service
 - `OPENAI_API_BASE` — API base URL (default: `https://api.openai.com/v1`)
 - `SO_API_KEY` — StackOverflow API key ([get one here](https://stackapps.com/))
-- `MODEL_NAME` — Model to use (default: `gpt-4o`)
+- `MODEL_NAME` — Model to use (default: `claude-opus-4-6`)
 
-### 3. Run the full pipeline
+### 2.3 Run the full pipeline
 
 ```bash
 bash run_pipeline.sh
@@ -46,9 +46,9 @@ bash run_pipeline.sh
 
 This runs in a loop: scrape → generate → validate → next round.
 
-## Running Steps Individually
+## 3. 🔧 Running Steps Individually
 
-### Scrape StackOverflow
+### 3.1 Scrape StackOverflow
 
 ```bash
 python scraper/so_scraper.py \
@@ -58,17 +58,17 @@ python scraper/so_scraper.py \
     --api-key "$SO_API_KEY"
 ```
 
-### Generate Tasks
+### 3.2 Generate Tasks
 
 ```bash
 python generator/task_generator.py \
     --input ./data/so_data_r1.json \
     --output ./data/candidates_r1 \
     --workers 16 \
-    --model gpt-4o
+    --model claude-opus-4-6
 ```
 
-### Validate Tasks (requires Docker)
+### 3.3 Validate Tasks (requires Docker)
 
 ```bash
 python validator/validate_tasks.py \
@@ -78,7 +78,7 @@ python validator/validate_tasks.py \
     --timeout 300
 ```
 
-## Output Format
+## 4. 📦 Output Format
 
 Each generated task has this structure:
 
@@ -96,7 +96,7 @@ task_00001/
     └── test_outputs.py     # pytest assertions
 ```
 
-## Configuration
+## 5. ⚙️ Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -104,15 +104,15 @@ task_00001/
 | `GEN_WORKERS` | 16 | Parallel threads for generation |
 | `VAL_WORKERS` | 8 | Parallel threads for validation |
 | `VAL_TIMEOUT` | 300 | Docker timeout per step (seconds) |
-| `MODEL_NAME` | gpt-4o | LLM model name |
+| `MODEL_NAME` | claude-opus-4-6 | LLM model name |
 
-## Requirements
+## 6. 📋 Requirements
 
 - Python 3.10+
 - Docker (for validation step)
 - An OpenAI-compatible API endpoint
 - StackOverflow API key (optional, increases rate limits)
 
-## License
+## 7. 📄 License
 
 MIT

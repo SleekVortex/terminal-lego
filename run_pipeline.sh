@@ -20,7 +20,7 @@ fi
 : "${OPENAI_API_KEY:?Error: OPENAI_API_KEY not set. Copy .env.example to .env and fill in your keys.}"
 : "${OPENAI_API_BASE:=https://api.openai.com/v1}"
 : "${SO_API_KEY:=}"
-: "${MODEL_NAME:=gpt-4o}"
+: "${MODEL_NAME:=claude-opus-4-6}"
 : "${GEN_WORKERS:=16}"
 : "${VAL_WORKERS:=8}"
 : "${VAL_TIMEOUT:=300}"
