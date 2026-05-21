@@ -1,0 +1,118 @@
+# Terminal-Lego
+
+Automatically generate terminal-based programming tasks from StackOverflow questions, with Docker-based validation.
+
+## Pipeline Overview
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  SO Scraper │────▶│  Task Generator  │────▶│  Docker Validator│
+│  (Phase 1)  │     │  (Phase 2)       │     │  (Phase 3)       │
+└─────────────┘     └──────────────────┘     └─────────────────┘
+  Crawl SO            LLM generates:           Build & run in
+  questions           - instruction.md         Docker container,
+  with accepted       - environment/           verify with tests
+  answers             - solution/solve.sh
+                      - tests/
+                      - Dockerfile
+```
+
+## Quick Start
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Configure
+
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
+
+Required environment variables:
+- `OPENAI_API_KEY` — API key for an OpenAI-compatible LLM service
+- `OPENAI_API_BASE` — API base URL (default: `https://api.openai.com/v1`)
+- `SO_API_KEY` — StackOverflow API key ([get one here](https://stackapps.com/))
+- `MODEL_NAME` — Model to use (default: `gpt-4o`)
+
+### 3. Run the full pipeline
+
+```bash
+bash run_pipeline.sh
+```
+
+This runs in a loop: scrape → generate → validate → next round.
+
+## Running Steps Individually
+
+### Scrape StackOverflow
+
+```bash
+python scraper/so_scraper.py \
+    --round 1 \
+    --output ./data \
+    --count 5000 \
+    --api-key "$SO_API_KEY"
+```
+
+### Generate Tasks
+
+```bash
+python generator/task_generator.py \
+    --input ./data/so_data_r1.json \
+    --output ./data/candidates_r1 \
+    --workers 16 \
+    --model gpt-4o
+```
+
+### Validate Tasks (requires Docker)
+
+```bash
+python validator/validate_tasks.py \
+    --input ./data/candidates_r1 \
+    --output ./data/validated_r1 \
+    --workers 8 \
+    --timeout 300
+```
+
+## Output Format
+
+Each generated task has this structure:
+
+```
+task_00001/
+├── instruction.md          # Task description
+├── task.toml               # Metadata (difficulty, category, tags)
+├── environment/
+│   ├── Dockerfile          # Container setup
+│   └── task_file/          # Input files
+├── solution/
+│   └── solve.sh            # Reference solution
+└── tests/
+    ├── test.sh             # Test runner
+    └── test_outputs.py     # pytest assertions
+```
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRAWL_COUNT` | 5000 | Questions to crawl per round |
+| `GEN_WORKERS` | 16 | Parallel threads for generation |
+| `VAL_WORKERS` | 8 | Parallel threads for validation |
+| `VAL_TIMEOUT` | 300 | Docker timeout per step (seconds) |
+| `MODEL_NAME` | gpt-4o | LLM model name |
+
+## Requirements
+
+- Python 3.10+
+- Docker (for validation step)
+- An OpenAI-compatible API endpoint
+- StackOverflow API key (optional, increases rate limits)
+
+## License
+
+MIT
