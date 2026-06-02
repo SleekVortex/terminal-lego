@@ -5,7 +5,7 @@
 •
 <a href="https://huggingface.co/StephYang/Terminal-Lego-Qwen3-8B" > 🤗 Terminal-Lego-Qwen3-8B/32B</a>
 •
-<a href="https://github.com/SWE-Lego/SWE-Lego" > 🧑‍💻 Code</a>
+<a href="https://github.com/SWE-Lego/terminal-lego" > 🧑‍💻 Code</a>
 •
 <a href="https://stephen0808.github.io/terminal-lego.github.io/#" > 📖 Paper</a>
 </p>
