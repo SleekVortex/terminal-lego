@@ -1,6 +1,14 @@
-# 🧱 Terminal-Lego
+<h1 align="center"> Terminal-Lego: What Makes Interaction Trajectories Effective for Training Terminal Agents? </h1>
 
-Automatically generate terminal-based programming tasks from StackOverflow questions, with Docker-based validation.
+<p align="center">
+<a href="https://huggingface.co/datasets/StephYang/Terminal-Lego-15k" > 🤗 HF Dataset </a>
+•
+<a href="https://huggingface.co/StephYang/Terminal-Lego-Qwen3-8B" > 🤗 Terminal-Lego-Qwen3-8B/32B</a>
+•
+<a href="https://github.com/SWE-Lego/SWE-Lego" > 🧑‍💻 Code</a>
+•
+<a href="https://stephen0808.github.io/terminal-lego.github.io/#" > 📖 Paper</a>
+</p>
 
 ## 1. 🔭 Pipeline Overview
 
