@@ -11,7 +11,7 @@
 •
 <a href="https://arxiv.org/pdf/2606.03461v1" > 📖 Paper</a>
 </p>
-<p>
+<p align="center">
 <a href="https://stephen0808.github.io/terminal-lego.github.io/#" > 📖 Project</a>
 </p>
 
