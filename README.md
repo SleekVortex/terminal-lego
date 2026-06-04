@@ -3,6 +3,8 @@
 <p align="center">
 <a href="https://huggingface.co/datasets/StephYang/Terminal-Lego-15k" > 🤗 HF Dataset </a>
 •
+<a href="https://huggingface.co/datasets/SWE-Lego/Terminal-Lego-Traj-Deepseek-V3-2-15k" > 🤗 Trajectory </a>
+•
 <a href="https://huggingface.co/StephYang/Terminal-Lego-Qwen3-8B" > 🤗 Terminal-Lego-Qwen3-8B/32B</a>
 •
 <a href="https://github.com/SWE-Lego/terminal-lego" > 🧑‍💻 Code</a>
