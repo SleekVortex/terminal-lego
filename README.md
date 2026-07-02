@@ -115,6 +115,59 @@ python validator/validate_tasks.py \
     --timeout 300
 ```
 
+### 3.4 Generate Agent Solution Rollouts
+
+After validation, run Harbor-supported agents on accepted task directories:
+
+```bash
+AGENT=terminus-2 \
+MODEL_NAME=openai/glm-5.2-fp8 \
+OPENAI_API_BASE=http://localhost:30002/v1 \
+OPENAI_API_KEY=EMPTY \
+MATERIALIZE_INSTRUCTION=/home/avzavodov/projects/swe-lego/materialize_solution.md \
+scripts/generate_solutions.sh \
+    ./data/validated_r1 \
+    ./data/solution_runs
+```
+
+`generator/solution_generator.py` uses Harbor directly, so the same interface can
+run other Harbor agents and environments:
+
+```bash
+python generator/solution_generator.py \
+    --tasks-dir ./data/validated_r1 \
+    --jobs-dir ./data/solution_runs \
+    --agent mini-swe-agent \
+    --model openai/gpt-4.1 \
+    --env docker \
+    --n-concurrent 4
+```
+
+Outputs are written under `<jobs-dir>/<job-name>/`:
+
+```
+config.json
+result.json
+solution_generation_summary.json
+accepted_trajectories.jsonl
+failed_trials.jsonl
+<trial_name>/agent/trajectory.json
+<trial_name>/artifacts/logs/artifacts/solve.sh
+<trial_name>/verifier/reward.txt
+```
+
+For task generation from StackOverflow JSONL, the convenience wrapper is:
+
+```bash
+PER_CATEGORY=2 \
+MODEL_NAME=openai/glm-5.2-fp8 \
+OPENAI_API_BASE=http://localhost:30002/v1 \
+OPENAI_API_KEY=EMPTY \
+scripts/generate_tasks.sh \
+    /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
+    ./data/so_smoke
+```
+
 ## 4. 📦 Output Format
 
 Each generated task has this structure:

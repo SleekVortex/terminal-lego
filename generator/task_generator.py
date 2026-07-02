@@ -161,9 +161,27 @@ class SOQuestion:
 def clean_html(html_content: str) -> str:
     if not html_content:
         return ""
-    text = html.unescape(html_content)
-    text = re.sub(r'<pre[^>]*><code[^>]*>(.*?)</code></pre>', r'```\n\1\n```', text, flags=re.DOTALL)
-    text = re.sub(r'<code>(.*?)</code>', r'`\1`', text, flags=re.DOTALL)
+
+    code_placeholders: Dict[str, str] = {}
+
+    def stash_code_block(match: re.Match) -> str:
+        placeholder = f"@@TL_CODE_BLOCK_{len(code_placeholders)}@@"
+        code_placeholders[placeholder] = f"```\n{html.unescape(match.group(1))}\n```"
+        return placeholder
+
+    def stash_inline_code(match: re.Match) -> str:
+        placeholder = f"@@TL_INLINE_CODE_{len(code_placeholders)}@@"
+        code_placeholders[placeholder] = f"`{html.unescape(match.group(1))}`"
+        return placeholder
+
+    text = re.sub(
+        r'<pre[^>]*><code[^>]*>(.*?)</code></pre>',
+        stash_code_block,
+        html_content,
+        flags=re.DOTALL,
+    )
+    text = re.sub(r'<code>(.*?)</code>', stash_inline_code, text, flags=re.DOTALL)
+    text = html.unescape(text)
     text = re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r'[\2](\1)', text, flags=re.DOTALL)
     text = re.sub(r'<li>(.*?)</li>', r'- \1\n', text, flags=re.DOTALL)
     text = re.sub(r'<ul>|</ul>|<ol>|</ol>', '', text)
@@ -172,6 +190,8 @@ def clean_html(html_content: str) -> str:
     text = re.sub(r'<strong>(.*?)</strong>', r'**\1**', text, flags=re.DOTALL)
     text = re.sub(r'<em>(.*?)</em>', r'*\1*', text, flags=re.DOTALL)
     text = re.sub(r'<[^>]+>', '', text)
+    for placeholder, replacement in code_placeholders.items():
+        text = text.replace(placeholder, replacement)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
