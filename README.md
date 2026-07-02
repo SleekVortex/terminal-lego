@@ -72,6 +72,39 @@ python generator/task_generator.py \
     --model claude-opus-4-6
 ```
 
+### 3.2a Prepare StackOverflow dump JSONL
+
+For local StackOverflow dumps, use `stackoverflow/prepare_dataset.py` before
+task generation. It reads dump-derived JSONL rows, classifies rows into
+Terminal-Bench categories from tags, and writes either JSONL or the generator
+contract `{"metadata": ..., "questions": [...]}`.
+
+Balanced smoke seed:
+
+```bash
+python stackoverflow/prepare_dataset.py \
+    --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
+    --output ./data/so_seed_balanced32.json \
+    --format generator-json \
+    --per-category 2 \
+    --sort-by-score
+```
+
+100k set close to the Terminal-Bench 2.0 category distribution:
+
+```bash
+python stackoverflow/prepare_dataset.py \
+    --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_jsonl_20260702T165727+0300/questions.jsonl \
+    --output ./data/so_top100k_tbench_dist.jsonl \
+    --format jsonl \
+    --sample-size 100000 \
+    --distribution terminal-bench-2 \
+    --min-score 0
+```
+
+The tag taxonomy and benchmark distribution are in
+`stackoverflow/terminal_bench_tag_taxonomy.json`.
+
 ### 3.3 Validate Tasks (requires Docker)
 
 ```bash

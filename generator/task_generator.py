@@ -21,6 +21,7 @@ import hashlib
 import argparse
 import logging
 import time
+import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -133,10 +134,15 @@ class SOQuestion:
     accepted_answer_body: Optional[str]
     accepted_answer_score: Optional[int]
     link: str
+    categories: List[str]
+    selected_category: Optional[str]
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SOQuestion':
         answer = data.get('accepted_answer', {})
+        categories = data.get('categories', [])
+        if isinstance(categories, str):
+            categories = [categories]
         return cls(
             question_id=data['question_id'],
             title=data['title'],
@@ -146,7 +152,9 @@ class SOQuestion:
             accepted_answer_id=data.get('accepted_answer_id'),
             accepted_answer_body=answer.get('body') if answer else None,
             accepted_answer_score=answer.get('score') if answer else None,
-            link=data.get('link', '')
+            link=data.get('link', ''),
+            categories=categories,
+            selected_category=data.get('selected_category') or data.get('category'),
         )
 
 
@@ -739,6 +747,9 @@ RUN apt-get update && apt-get install -y \\
 COPY ./task_file /app/task_file
 """
 
+    def _toml_quote(self, value: Any) -> str:
+        return json.dumps(str(value), ensure_ascii=False)
+
     def _generate_task_toml(self, difficulty: str = "medium") -> str:
         tags = self.question.tags
         category_mapping = {
@@ -748,22 +759,28 @@ COPY ./task_file /app/task_file
             'ssh': 'networking', 'networking': 'networking',
             'database': 'database', 'sql': 'database',
         }
-        category = 'general'
-        for tag in tags:
-            if tag.lower() in category_mapping:
-                category = category_mapping[tag.lower()]
-                break
+        category = self.question.selected_category
+        if not category and self.question.categories:
+            category = self.question.categories[0]
+        if not category:
+            category = 'general'
+            for tag in tags:
+                if tag.lower() in category_mapping:
+                    category = category_mapping[tag.lower()]
+                    break
 
-        tags_str = ', '.join(f'"{t}"' for t in tags[:5])
+        tags_str = ', '.join(self._toml_quote(t) for t in tags[:5])
+        categories_str = ', '.join(self._toml_quote(c) for c in self.question.categories)
         return f'''version = "1.0"
 
 [metadata]
 author_name = "StackOverflow Community"
 author_email = "community@stackoverflow.com"
-difficulty = "{difficulty}"
-category = "{category}"
+difficulty = {self._toml_quote(difficulty)}
+category = {self._toml_quote(category)}
 tags = [{tags_str}]
-source_url = "{self.question.link}"
+categories = [{categories_str}]
+source_url = {self._toml_quote(self.question.link)}
 source_score = {self.question.score}
 
 [verifier]
