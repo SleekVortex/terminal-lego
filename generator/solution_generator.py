@@ -152,6 +152,7 @@ def build_job_config(args: argparse.Namespace):
         type=args.env,
         force_build=args.force_build,
         delete=args.delete,
+        extra_docker_compose=[p.resolve() for p in args.extra_docker_compose],
         kwargs=parse_key_value(args.environment_kwarg),
         env=parse_env(args.environment_env),
     )
@@ -323,6 +324,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--environment-build-timeout-multiplier", type=float, default=None)
     parser.add_argument("--force-build", action="store_true")
     parser.add_argument("--delete", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--extra-docker-compose", action="append", type=Path, default=[])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--disable-verification", action="store_true")

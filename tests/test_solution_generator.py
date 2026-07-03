@@ -82,6 +82,8 @@ def test_build_job_config_for_single_task_and_dataset(tmp_path: Path) -> None:
             "EMPTY",
             "--agent-env",
             "A=1",
+            "--extra-docker-compose",
+            str(tmp_path / "bridge.yaml"),
             "--environment-kwarg",
             "privileged=false",
             "--verifier-env",
@@ -97,6 +99,7 @@ def test_build_job_config_for_single_task_and_dataset(tmp_path: Path) -> None:
     assert dumped["agents"][0]["name"] == "terminus-2"
     assert dumped["agents"][0]["model_name"] == "openai/glm"
     assert dumped["agents"][0]["env"] == {"A": "1"}
+    assert dumped["environment"]["extra_docker_compose"] == [tmp_path / "bridge.yaml"]
     assert dumped["environment"]["kwargs"] == {"privileged": False}
     assert dumped["verifier"]["env"] == {"B": "2"}
     assert len(dumped["tasks"]) == 1
@@ -199,6 +202,8 @@ def test_parse_args_exposes_dry_run_and_harbor_options(tmp_path: Path) -> None:
             "--no-delete",
             "--agent-include-logs",
             "agent.log",
+            "--extra-docker-compose",
+            str(tmp_path / "bridge.yaml"),
         ]
     )
 
@@ -206,3 +211,4 @@ def test_parse_args_exposes_dry_run_and_harbor_options(tmp_path: Path) -> None:
     assert args.disable_verification is True
     assert args.delete is False
     assert args.agent_include_logs == ["agent.log"]
+    assert args.extra_docker_compose == [tmp_path / "bridge.yaml"]

@@ -11,6 +11,10 @@ Environment:
   MODEL_NAME              Model name passed to the agent.
   HARBOR_ENV              Harbor environment. Default: docker
   PYTHON_BIN              Python executable. Default: python3
+  DOCKER_NETWORK_STRATEGY Docker network strategy. Default: bridge
+                          Values: bridge, compose
+  CLEANUP_DOCKER          Remove leftover Docker compose containers/networks
+                          for this job on exit. Default: 1
   OPENAI_API_BASE         OpenAI-compatible API base.
   OPENAI_API_KEY          API key. Default: EMPTY
   JOB_NAME                Harbor job name. Default: solution-rollouts-<timestamp>
@@ -51,6 +55,79 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 JOB_NAME="${JOB_NAME:-solution-rollouts-$(date -u +%Y%m%dT%H%M%SZ)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+DOCKER_NETWORK_STRATEGY="${DOCKER_NETWORK_STRATEGY:-bridge}"
+CLEANUP_DOCKER="${CLEANUP_DOCKER:-1}"
+
+compose_project_name() {
+  local name="$1"
+  name="$(printf "%s" "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')"
+  if [[ ! "$name" =~ ^[a-z0-9] ]]; then
+    name="0$name"
+  fi
+  printf "%s\n" "$name"
+}
+
+cleanup_compose_projects() {
+  local job_dir="$1"
+  [[ -n "$job_dir" && -d "$job_dir" ]] || return 0
+  command -v docker >/dev/null 2>&1 || return 0
+
+  local projects=()
+  local dir base project existing
+  while IFS= read -r dir; do
+    base="${dir##*/}"
+    project="$(compose_project_name "$base")"
+    existing=" ${projects[*]} "
+    if [[ "$existing" != *" $project "* ]]; then
+      projects+=("$project")
+    fi
+  done < <(find "$job_dir" -mindepth 0 -maxdepth 2 -type f \( -name config.json -o -name result.json \) -exec dirname {} \; 2>/dev/null | sort -u)
+
+  ((${#projects[@]} > 0)) || return 0
+
+  local project_file
+  project_file="$(mktemp)"
+  printf "%s\n" "${projects[@]}" > "$project_file"
+
+  local containers=()
+  local networks=()
+  local resource_id project_label
+  while read -r resource_id project_label; do
+    [[ -n "${resource_id:-}" && -n "${project_label:-}" ]] || continue
+    if grep -Fxq "$project_label" "$project_file"; then
+      containers+=("$resource_id")
+    fi
+  done < <(docker ps -a --format '{{.ID}} {{.Label "com.docker.compose.project"}}' 2>/dev/null || true)
+
+  if ((${#containers[@]} > 0)); then
+    docker rm -f "${containers[@]}" >/dev/null 2>&1 || true
+  fi
+
+  while read -r resource_id project_label; do
+    [[ -n "${resource_id:-}" && -n "${project_label:-}" ]] || continue
+    if grep -Fxq "$project_label" "$project_file"; then
+      networks+=("$resource_id")
+    fi
+  done < <(docker network ls --format '{{.ID}} {{.Label "com.docker.compose.project"}}' 2>/dev/null || true)
+
+  if ((${#networks[@]} > 0)); then
+    docker network rm "${networks[@]}" >/dev/null 2>&1 || true
+  fi
+
+  rm -f "$project_file"
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  case "$CLEANUP_DOCKER" in
+    1|true|TRUE|yes|YES)
+      cleanup_compose_projects "${JOBS_DIR%/}/${JOB_NAME}" || true
+      ;;
+  esac
+  exit "$status"
+}
+trap cleanup EXIT
 
 args=(
   --tasks-dir "${TASKS_DIR}"
@@ -73,6 +150,18 @@ fi
 if [[ -n "${OPENAI_API_BASE:-}" ]]; then
   args+=(--api-base "${OPENAI_API_BASE}")
 fi
+
+case "$DOCKER_NETWORK_STRATEGY" in
+  bridge)
+    args+=(--extra-docker-compose "${REPO_DIR}/configs/harbor/docker-compose-bridge-network.yaml")
+    ;;
+  compose|default|off|none)
+    ;;
+  *)
+    echo "ERROR: DOCKER_NETWORK_STRATEGY must be one of: bridge, compose" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -n "${MATERIALIZE_INSTRUCTION:-}" ]]; then
   args+=(--extra-instruction-path "${MATERIALIZE_INSTRUCTION}")
