@@ -77,6 +77,21 @@ def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
     assert "..." in listing
 
 
+def test_prompt_templates_are_loaded_from_prompt_files() -> None:
+    prompt_files = {
+        "system.md": tg.SYSTEM_PROMPT,
+        "instruction.md": tg.INSTRUCTION_PROMPT_TEMPLATE,
+        "environment.md": tg.ENVIRONMENT_PROMPT_TEMPLATE,
+        "solution.md": tg.SOLUTION_PROMPT_TEMPLATE,
+        "tests.md": tg.TEST_PROMPT_TEMPLATE,
+        "dockerfile.md": tg.DOCKERFILE_PROMPT_TEMPLATE,
+    }
+
+    assert tg.PROMPT_TEMPLATE_DIR.name == "task_generator"
+    for filename, prompt in prompt_files.items():
+        assert prompt == (tg.PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
+
+
 def test_token_tracker_records_stage_telemetry(tmp_path: Path) -> None:
     usage_path = tmp_path / "usage.json"
     tracker = tg.TokenTracker(str(usage_path))

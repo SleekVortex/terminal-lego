@@ -1,0 +1,419 @@
+# Task Generation Pipeline
+
+Документ описывает текущую реализацию генерации Terminal-Lego задач из StackOverflow-derived датасета.
+
+## Основные Файлы
+
+- `scripts/generate_tasks.sh` - convenience wrapper для подготовки seed и запуска генератора.
+- `stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
+- `generator/task_generator.py` - LLM-based генерация task directory.
+- `prompts/task_generator/*.md` - prompt templates для стадий генерации.
+- `validator/validate_tasks.py` - отдельная Docker round-trip валидация generated candidates.
+
+## Общая Схема
+
+```text
+StackOverflow JSONL
+  -> stackoverflow/prepare_dataset.py
+  -> seed.json, формат {"metadata": ..., "questions": [...]}
+  -> generator/task_generator.py
+  -> candidates/task_XXXXX/
+  -> validator/validate_tasks.py, опционально
+  -> validated/task_XXXXX/
+```
+
+`scripts/generate_tasks.sh` автоматизирует первые две стадии:
+
+```bash
+scripts/generate_tasks.sh INPUT_JSONL OUTPUT_DIR
+```
+
+Wrapper пишет:
+
+- `OUTPUT_DIR/seed.json`, если не переопределен `SEED_JSON`;
+- `OUTPUT_DIR/candidates`, если не переопределен `CANDIDATES_DIR`.
+
+## Подготовка Seed
+
+`stackoverflow/prepare_dataset.py` принимает JSONL, где каждая строка - StackOverflow question row с `accepted_answer`.
+
+Поддерживаемые входные поля нормализуются в контракт генератора:
+
+```json
+{
+  "question_id": 123,
+  "title": "...",
+  "body": "...",
+  "tags": ["bash", "json"],
+  "score": 42,
+  "view_count": 1000,
+  "answer_count": 3,
+  "accepted_answer_id": 456,
+  "accepted_answer": {
+    "answer_id": 456,
+    "body": "...",
+    "score": 50
+  },
+  "link": "https://stackoverflow.com/questions/123",
+  "categories": ["system-administration", "data-processing"],
+  "selected_category": "system-administration"
+}
+```
+
+Если `categories` отсутствуют, они восстанавливаются через `stackoverflow/tag_taxonomy.py` по тегам. `selected_category` берется из входа, иначе из первой найденной категории.
+
+Фильтры и режимы выборки:
+
+- `--min-score` / `MIN_SCORE` - отбрасывает вопросы ниже score.
+- `--category` / `CATEGORY` - оставляет строки, пересекающиеся с указанными категориями.
+- `--allow-uncategorized` - разрешает строки без категории.
+- `--sort-by-score` / `SORT_BY_SCORE=1` - выбирает лучшие строки по composite score.
+- `--limit` / `LIMIT` - ограничивает количество строк.
+- `--start` / `START` - offset после фильтрации для first/top mode.
+- `--per-category` / `PER_CATEGORY` - top N на категорию.
+- `--sample-size` / `SAMPLE_SIZE` + `--distribution terminal-bench-2` - выборка близко к Terminal-Bench 2.0 distribution.
+
+Composite score сортировки:
+
+```text
+question score,
+accepted answer score,
+view count,
+answer count,
+question_id as stable tie-breaker
+```
+
+Выход для генератора - JSON object:
+
+```json
+{
+  "metadata": {
+    "source": "...",
+    "format": "generator-json",
+    "total": 1000,
+    "with_answers": 1000,
+    "updated": "..."
+  },
+  "questions": [...]
+}
+```
+
+## Загрузка Prompt Templates
+
+`generator/task_generator.py` не хранит большие prompts в коде. Они читаются из:
+
+```text
+prompts/task_generator/system.md
+prompts/task_generator/instruction.md
+prompts/task_generator/environment.md
+prompts/task_generator/solution.md
+prompts/task_generator/tests.md
+prompts/task_generator/dockerfile.md
+```
+
+Кодовый контракт:
+
+```python
+PROMPT_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "prompts" / "task_generator"
+```
+
+Файлы читаются через `.read_text(...).rstrip("\n")`, поэтому финальный trailing newline в prompt-файле не попадает в LLM request.
+
+## LLM Client
+
+`call_llm_api()` отправляет OpenAI-compatible `POST /chat/completions`.
+
+Настройки по умолчанию:
+
+- `DEFAULT_API_BASE = "https://api.openai.com/v1"`;
+- `DEFAULT_MODEL = "claude-opus-4-6"`;
+- `MAX_RETRIES = 3`;
+- `REQUEST_TIMEOUT = 300`;
+- `REQUEST_INTERVAL = 0.2`.
+
+Конфиг берется из CLI или env:
+
+- `--api-base` или `OPENAI_API_BASE`;
+- `--api-key` или `OPENAI_API_KEY`;
+- `--model` или `MODEL_NAME`.
+
+Каждая LLM стадия пишет telemetry в `api_token_usage.json`:
+
+- model;
+- task name;
+- stage;
+- attempt;
+- status;
+- prompt/completion/total tokens;
+- duration;
+- success/failure;
+- агрегаты `by_stage`.
+
+Для `instruction` включен `check_truncation=True`. При подозрении на обрезанный JSON/fenced block запрос повторяется, если остались retry.
+
+## Генерация Task Directory
+
+`TaskGenerator.generate()` выполняет каскадно:
+
+```text
+instruction -> environment -> solution -> difficulty -> tests -> dockerfile -> write_files
+```
+
+Если критическая стадия не вернула результат, задача считается failed и не записывается.
+
+### 1. `instruction.md`
+
+Метод: `_generate_instruction()`.
+
+В prompt передаются:
+
+- `title`;
+- `tags`;
+- HTML-cleaned `body`.
+
+HTML чистится через `clean_html()`:
+
+- `<pre><code>...</code></pre>` превращается в fenced code block;
+- inline `<code>` превращается в backticks;
+- ссылки сохраняются как Markdown links;
+- списки, абзацы, `<strong>`, `<em>` сохраняются в Markdown-like виде;
+- остальной HTML удаляется.
+
+Температура: `TEMP_INSTRUCTION = 0.7`.
+
+Ответ принимается как raw Markdown. Если модель обернула его в ```markdown, wrapper удаляется.
+
+### 2. `environment/`
+
+Метод: `_generate_environment(instruction)`.
+
+Prompt просит JSON:
+
+```json
+{
+  "files": {
+    "relative/path/filename": "file content"
+  },
+  "directories": ["task_file", "task_file/input"]
+}
+```
+
+Температура: `TEMP_ENVIRONMENT = 0.3`.
+
+Парсинг:
+
+1. сначала ищется fenced ```json block;
+2. если не найден или не парсится, пробуется весь response как JSON;
+3. если не получилось, используется fallback:
+
+```json
+{"files": {}, "directories": ["task_file"]}
+```
+
+Все пути интерпретируются относительно `environment/`.
+
+### 3. `solution/solve.sh`
+
+Метод: `_generate_solution(instruction, env_data)`.
+
+Prompt получает:
+
+- generated `instruction`;
+- cleaned accepted answer body;
+- tags;
+- список доступных environment files.
+
+Список environment files формируется `_format_env_file_list()`:
+
+```text
+[dir]  /app/task_file/input/
+[file] /app/task_file/input/data.txt
+       Content: first 200 chars...
+```
+
+Температура: `TEMP_SOLUTION = 0.3`.
+
+Ответ извлекается из ```bash или ```sh block. Если fenced block нет, берется весь response.
+
+### 4. Difficulty
+
+Метод: `_assess_difficulty(instruction)`.
+
+Сложность сейчас определяется детерминированно, без LLM:
+
+```text
+easy:
+  body_len <= 1200
+  and body_len + answer_len <= 3000
+  and code_blocks <= 1
+
+hard:
+  body_len >= 5000
+  or body_len + answer_len >= 10000
+  or code_blocks >= 4
+
+medium:
+  все остальное
+```
+
+`code_blocks` считается по cleaned question body: `body.count("```") // 2`.
+
+### 5. `tests/`
+
+Метод: `_generate_tests(instruction, env_data, solution)`.
+
+Prompt просит JSON:
+
+```json
+{
+  "test_sh": "#!/bin/bash\n...",
+  "test_outputs_py": "import pytest\n..."
+}
+```
+
+Температура: `TEMP_TESTS = 0.2`.
+
+Логика attempts:
+
+1. максимум 3 генерации;
+2. JSON извлекается из fenced ```json или из всего response;
+3. `test_outputs_py` должен существовать;
+4. `ast.parse(test_outputs_py)` должен пройти;
+5. `_review_tests()` выполняет static review.
+
+Static review сейчас проверяет:
+
+- `test_outputs.py` не должен запускать `solve.sh` через `subprocess.run/call/check_call/check_output/Popen`, `os.system`, `os.popen`;
+- imports кроме `pytest` должны быть из Python stdlib. Нестандартные библиотеки вроде `pandas`, `numpy`, `cv2` отклоняются.
+
+Если review прошел, тесты принимаются. Если review отклонил, candidate сохраняется. Если ни один из 3 attempts не прошел, но были syntactically valid candidates, возвращается первый rejected candidate. Если candidates нет, стадия failed.
+
+### 6. `environment/Dockerfile`
+
+Метод: `_generate_dockerfile(instruction)`.
+
+Prompt получает generated `instruction` и tags.
+
+Температура: `TEMP_DOCKERFILE = 0.3`.
+
+Ответ извлекается из ```dockerfile или generic fenced block. Если ответ отсутствует или не извлечен, используется fallback:
+
+```dockerfile
+FROM ubuntu:22.04
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    bash coreutils findutils grep sed gawk curl wget git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY ./task_file /app/task_file
+```
+
+## Запись Файлов
+
+`_write_files()` создает:
+
+```text
+task_XXXXX/
+  instruction.md
+  task.toml
+  environment/
+    Dockerfile
+    task_file/...
+  solution/
+    solve.sh
+  tests/
+    __init__.py
+    test.sh
+    test_outputs.py
+```
+
+`task_name`:
+
+- если generator получил `index`, используется `task_{index:05d}`;
+- иначе slug из title + question id.
+
+`task.toml` содержит:
+
+- metadata: author, difficulty, category, tags, categories, source URL, source score;
+- verifier timeout: 300 sec;
+- agent timeout: 600 sec;
+- environment build timeout: 120 sec;
+- cpus: 1;
+- memory: 1G;
+- storage: 5G.
+
+Category выбирается так:
+
+1. `selected_category`, если есть;
+2. первая category из `categories`;
+3. fallback `general`;
+4. для некоторых тегов есть старый local mapping, например `linux -> system-administration`, `docker -> containerization`.
+
+## Параллелизм И Итоговые Артефакты
+
+`task_generator.py` запускает `ThreadPoolExecutor(max_workers=args.workers)`.
+
+В конце пишет:
+
+```text
+CANDIDATES_DIR/generation_summary.json
+task_generator.log
+api_token_usage.json
+```
+
+`generation_summary.json` содержит:
+
+- total processed;
+- success count;
+- error count;
+- skip count;
+- elapsed seconds;
+- model;
+- timestamp;
+- token usage summary.
+
+## Валидация Generated Candidates
+
+Валидация не входит в `scripts/generate_tasks.sh`; она запускается отдельно через:
+
+```bash
+python validator/validate_tasks.py \
+  --input ./candidates \
+  --output ./validated \
+  --workers 8 \
+  --timeout 300
+```
+
+`validator/validate_tasks.py` делает Docker round-trip:
+
+1. проверяет наличие `environment/Dockerfile`, `solution/solve.sh`, `tests/test.sh`;
+2. собирает image:
+
+```bash
+docker build -t tl-validate-<task> -f environment/Dockerfile environment/
+```
+
+3. запускает container с `--memory 1g --cpus 1`;
+4. копирует `solution/solve.sh` в `/app/solve.sh`;
+5. запускает reference solution в `/app`;
+6. копирует `tests/` в `/tests`;
+7. запускает `/tests/test.sh` в `/app`;
+8. читает `/logs/verifier/reward.txt`;
+9. если reward == 1, копирует task directory в validated output.
+
+В конце пишет:
+
+```text
+validated/validation_report.json
+validate_tasks.log
+```
+
+## Важные Ограничения Текущей Реализации
+
+- Task generation генерирует небольшие standalone terminal tasks, обычно без полноценного repository context.
+- Tests генерируются моделью, но проходят только static review до Docker validation.
+- `test.sh` пока генерируется LLM-ом вместе с `test_outputs.py`, хотя по смыслу это runner template.
+- Нестандартные Python imports в `test_outputs.py` static review отклоняет.
+- Валидация проверяет reference solution, а не agent solution.
+- `scripts/generate_tasks.sh` принимает JSONL, но `generator/task_generator.py` напрямую принимает только generator JSON с полем `questions`.

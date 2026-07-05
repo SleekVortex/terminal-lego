@@ -437,179 +437,19 @@ def call_llm_api(
     return None
 
 
-SYSTEM_PROMPT = """You are a professional technical task designer responsible for converting StackOverflow questions into Terminal Bench format programming tasks.
-You need to generate clear, executable, and testable tasks. All outputs should be actual runnable code and scripts.
-Please ensure the generated content is in correct format and can be directly saved as files."""
+PROMPT_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "prompts" / "task_generator"
 
-INSTRUCTION_PROMPT_TEMPLATE = """Please convert the following StackOverflow question into a Terminal Bench task instruction.md file.
 
-**Original Question:**
-Title: {title}
-Tags: {tags}
-Content:
-{body}
+def _load_prompt_template(filename: str) -> str:
+    return (PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
 
-**Requirements:**
-1. Write a clear task description in Markdown format
-2. The task should be completed in a Linux terminal environment
-3. Specify clear working directory paths (use /app/task_file/ as root directory)
-4. If input files are needed, specify file location (e.g., /app/task_file/input/)
-5. If output files are needed, specify output location (e.g., /app/task_file/output/)
-6. Provide specific success criteria
 
-Please output the instruction.md content directly in markdown format. Do NOT wrap in code blocks."""
-
-ENVIRONMENT_PROMPT_TEMPLATE = """Based on the following Terminal Bench task, analyze and generate the required environment files.
-
-**Task instruction:**
-{instruction}
-
-**Original question info:**
-Title: {title}
-Tags: {tags}
-
-**Requirements:**
-1. Analyze what preset files the task needs (e.g., input data, config files)
-2. Generate reasonable test data
-3. File paths relative to environment/ directory
-4. If needed, create subdirectory structure like task_file/input/
-
-**Output format (JSON):**
-```json
-{{
-    "files": {{
-        "relative/path/filename": "file content",
-        "task_file/input/example.txt": "example content..."
-    }},
-    "directories": ["task_file", "task_file/input", "task_file/output"]
-}}
-```
-
-Please output only JSON, wrapped with ```json```. If no files are needed, return empty files and directories."""
-
-SOLUTION_PROMPT_TEMPLATE = """Based on the following Terminal Bench task and StackOverflow answer, generate solution/solve.sh file.
-
-**Task instruction:**
-{instruction}
-
-**StackOverflow answer:**
-{answer}
-
-**Tags:** {tags}
-
-**Environment files available in the container:**
-{env_file_list}
-
-**Requirements:**
-1. Generate an executable bash script
-2. The script should complete the task requirements
-3. Include necessary comments
-4. Handle possible error cases
-5. Ensure output meets task requirements
-6. The script runs inside the container at WORKDIR /app
-
-**Output format:**
-```bash
-#!/bin/bash
-# Your solution code...
-```
-
-Please output only bash script content, wrapped with ```bash```."""
-
-TEST_PROMPT_TEMPLATE = """Based on the following Terminal Bench task, its environment, and its reference solution, generate test code.
-
-**Task instruction:**
-{instruction}
-
-**Environment files in the container:**
-{env_file_list}
-
-**Reference solution (solve.sh) that will be executed:**
-```bash
-{solution}
-```
-
-**Tags:** {tags}
-
-**Generate two files:**
-
-1. **test.sh** - Test runner script, format:
-```bash
-#!/bin/bash
-
-apt-get update && apt-get install -y curl
-
-curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh
-source $HOME/.local/bin/env
-
-if [ "$PWD" = "/" ]; then
-    echo "Error: No working directory set."
-    exit 1
-fi
-
-uvx \\
-  -p 3.13 \\
-  -w pytest==8.4.1 \\
-  -w pytest-json-ctrf==0.3.5 \\
-  pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA
-
-if [ $? -eq 0 ]; then
-  echo 1 > /logs/verifier/reward.txt
-else
-  echo 0 > /logs/verifier/reward.txt
-fi
-```
-
-2. **test_outputs.py** - pytest test file that verifies the state AFTER solve.sh has already been executed:
-
-**CRITICAL RULES for test_outputs.py:**
-- solve.sh has ALREADY been executed before test_outputs.py runs. Do NOT call solve.sh again.
-- Tests should ONLY check the resulting state: output files, file contents, directory structures, etc.
-- Use os.path.exists(), open().read(), subprocess.run() for verification commands — but NEVER run solve.sh.
-
-**ROBUSTNESS RULES:**
-- When checking output files that list paths, use `line.endswith("filename")` or `os.path.basename(line)`.
-- When checking file contents, use `in` operator or regex, NOT exact equality.
-- When counting lines, allow for trailing newlines: `len([l for l in content.strip().splitlines() if l.strip()])`.
-- Prefer checking that files/directories EXIST on disk over parsing output text.
-
-**Output format (JSON):**
-```json
-{{
-    "test_sh": "#!/bin/bash\\n...",
-    "test_outputs_py": "import pytest\\n..."
-}}
-```
-
-Please output only JSON, wrapped with ```json```. Ensure Python code syntax is correct."""
-
-DOCKERFILE_PROMPT_TEMPLATE = """Based on the following Terminal Bench task, generate a Dockerfile for the environment.
-
-**Task instruction:**
-{instruction}
-
-**Tags:** {tags}
-
-**Requirements:**
-1. Choose an appropriate base image:
-   - Python tasks: `python:3.13-slim-bookworm`
-   - Node.js tasks: `node:20-slim`
-   - Java tasks: `openjdk:17-slim`
-   - Go tasks: `golang:1.21-bookworm`
-   - General Linux/shell tasks: `ubuntu:22.04`
-2. Install necessary packages
-3. Set WORKDIR to /app
-4. COPY ./task_file /app/task_file
-
-**Output format:**
-```dockerfile
-FROM <base_image>
-WORKDIR /app
-RUN apt-get update && apt-get install -y <packages> && rm -rf /var/lib/apt/lists/*
-COPY ./task_file /app/task_file
-```
-
-Please output only Dockerfile content, wrapped with ```dockerfile```."""
+SYSTEM_PROMPT = _load_prompt_template("system.md")
+INSTRUCTION_PROMPT_TEMPLATE = _load_prompt_template("instruction.md")
+ENVIRONMENT_PROMPT_TEMPLATE = _load_prompt_template("environment.md")
+SOLUTION_PROMPT_TEMPLATE = _load_prompt_template("solution.md")
+TEST_PROMPT_TEMPLATE = _load_prompt_template("tests.md")
+DOCKERFILE_PROMPT_TEMPLATE = _load_prompt_template("dockerfile.md")
 
 
 class TaskGenerator:

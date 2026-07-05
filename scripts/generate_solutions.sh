@@ -22,7 +22,7 @@ Environment:
   N_CONCURRENT            Concurrent trials. Default: 1
   MAX_RETRIES             Harbor retry count. Default: 0
   MATERIALIZE_INSTRUCTION Extra instruction path for /logs/artifacts/solve.sh.
-                          Default: prompts/materialize_solution.md
+                          Default: prompts/solution_generator/materialize_solution.md
 
 Examples:
   AGENT=terminus-2 MODEL_NAME=openai/glm-5.2-fp8 \
@@ -51,7 +51,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-MATERIALIZE_INSTRUCTION="${MATERIALIZE_INSTRUCTION:-${REPO_DIR}/prompts/materialize_solution.md}"
+MATERIALIZE_INSTRUCTION="${MATERIALIZE_INSTRUCTION:-${REPO_DIR}/prompts/solution_generator/materialize_solution.md}"
 
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
 JOB_NAME="${JOB_NAME:-solution-rollouts-$(date -u +%Y%m%dT%H%M%SZ)}"
