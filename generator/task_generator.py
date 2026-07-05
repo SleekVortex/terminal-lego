@@ -6,7 +6,7 @@ Converts StackOverflow questions into Terminal Bench format tasks using an LLM.
 Each task includes: instruction.md, environment/, solution/solve.sh, tests/, Dockerfile.
 
 Generation order (cascaded):
-  instruction → environment → solution → difficulty → tests (3x gen+review) → dockerfile
+  instruction → environment → solution → difficulty → tests (3x gen+static review) → dockerfile
 
 Usage:
     python task_generator.py --input so_data.json --output ./candidates --workers 16
@@ -82,18 +82,68 @@ class TokenTracker:
         self.records = []
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.total_duration_sec = 0.0
+        self.success_count = 0
+        self.failure_count = 0
+        self.by_stage: Dict[str, Dict[str, Any]] = {}
 
-    def record(self, prompt_tokens: int, completion_tokens: int, model: str = None, task_name: str = None):
+    def record(
+        self,
+        prompt_tokens: int,
+        completion_tokens: int,
+        model: str = None,
+        task_name: str = None,
+        stage: str = None,
+        duration_sec: float = 0.0,
+        success: bool = True,
+        attempt: int = 1,
+        status: str = "ok",
+        error: str = None,
+    ):
+        stage_name = stage or "unknown"
+        prompt_tokens = int(prompt_tokens or 0)
+        completion_tokens = int(completion_tokens or 0)
+        duration = float(duration_sec or 0.0)
+        total_tokens = prompt_tokens + completion_tokens
         with self.lock:
             self.records.append({
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "model": model,
                 "task_name": task_name,
+                "stage": stage_name,
+                "attempt": attempt,
+                "success": success,
+                "status": status,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "duration_sec": round(duration, 3),
+                "error": error,
             })
             self.total_prompt_tokens += prompt_tokens
             self.total_completion_tokens += completion_tokens
+            self.total_duration_sec += duration
+            if success:
+                self.success_count += 1
+            else:
+                self.failure_count += 1
+
+            stage_stats = self.by_stage.setdefault(stage_name, {
+                "call_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "duration_sec": 0.0,
+            })
+            stage_stats["call_count"] += 1
+            stage_stats["success_count"] += int(success)
+            stage_stats["failure_count"] += int(not success)
+            stage_stats["prompt_tokens"] += prompt_tokens
+            stage_stats["completion_tokens"] += completion_tokens
+            stage_stats["total_tokens"] += total_tokens
+            stage_stats["duration_sec"] = round(stage_stats["duration_sec"] + duration, 3)
             self._save()
 
     def _save(self):
@@ -101,7 +151,11 @@ class TokenTracker:
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
             "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "total_duration_sec": round(self.total_duration_sec, 3),
             "call_count": len(self.records),
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "by_stage": self.by_stage,
             "records": self.records[-500:]
         }
         try:
@@ -116,7 +170,11 @@ class TokenTracker:
                 "total_prompt_tokens": self.total_prompt_tokens,
                 "total_completion_tokens": self.total_completion_tokens,
                 "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
-                "call_count": len(self.records)
+                "total_duration_sec": round(self.total_duration_sec, 3),
+                "call_count": len(self.records),
+                "success_count": self.success_count,
+                "failure_count": self.failure_count,
+                "by_stage": self.by_stage,
             }
 
 
@@ -234,6 +292,7 @@ def call_llm_api(
     temperature: float = 0.7,
     check_truncation: bool = False,
     task_name: str = None,
+    stage: str = None,
     max_tokens: int = 16384,
 ) -> Optional[str]:
     global _last_request_time
@@ -256,6 +315,7 @@ def call_llm_api(
     }
 
     for attempt in range(MAX_RETRIES):
+        attempt_started = time.time()
         with _api_lock:
             elapsed = time.time() - _last_request_time
             if elapsed < REQUEST_INTERVAL:
@@ -272,6 +332,18 @@ def call_llm_api(
 
             if response.status_code == 429:
                 retry_after = int(response.headers.get('Retry-After', RETRY_DELAY * (attempt + 2)))
+                token_tracker.record(
+                    0,
+                    0,
+                    _config['model'],
+                    task_name,
+                    stage=stage,
+                    duration_sec=time.time() - attempt_started,
+                    success=False,
+                    attempt=attempt + 1,
+                    status="rate_limited",
+                    error=f"retry_after={retry_after}",
+                )
                 logger.warning(f"Rate limited, waiting {retry_after}s...")
                 time.sleep(retry_after)
                 continue
@@ -283,10 +355,26 @@ def call_llm_api(
             usage = result.get('usage', {})
             prompt_tokens = usage.get('prompt_tokens', 0)
             completion_tokens = usage.get('completion_tokens', 0)
-            if prompt_tokens > 0 or completion_tokens > 0:
-                token_tracker.record(prompt_tokens, completion_tokens, _config['model'], task_name)
+            is_truncated = check_truncation and _is_truncated(content)
+            will_retry_truncated = is_truncated and attempt < MAX_RETRIES - 1
+            status = "ok"
+            if will_retry_truncated:
+                status = "truncated_retry"
+            elif is_truncated:
+                status = "truncated_final"
+            token_tracker.record(
+                prompt_tokens,
+                completion_tokens,
+                _config['model'],
+                task_name,
+                stage=stage,
+                duration_sec=time.time() - attempt_started,
+                success=not will_retry_truncated,
+                attempt=attempt + 1,
+                status=status,
+            )
 
-            if check_truncation and _is_truncated(content):
+            if is_truncated:
                 logger.warning(f"Output truncated (attempt {attempt + 1}), retrying...")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY)
@@ -294,10 +382,35 @@ def call_llm_api(
 
             return content
         except requests.exceptions.Timeout:
+            token_tracker.record(
+                0,
+                0,
+                _config['model'],
+                task_name,
+                stage=stage,
+                duration_sec=time.time() - attempt_started,
+                success=False,
+                attempt=attempt + 1,
+                status="timeout",
+                error="request timeout",
+            )
             logger.warning(f"Timeout (attempt {attempt + 1})")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY)
         except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
+            token_tracker.record(
+                0,
+                0,
+                _config['model'],
+                task_name,
+                stage=stage,
+                duration_sec=time.time() - attempt_started,
+                success=False,
+                attempt=attempt + 1,
+                status="http_error",
+                error=f"status={status_code}: {e}",
+            )
             if e.response and e.response.status_code == 429:
                 time.sleep(RETRY_DELAY * (2 ** attempt))
             else:
@@ -305,6 +418,18 @@ def call_llm_api(
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY * (attempt + 1))
         except Exception as e:
+            token_tracker.record(
+                0,
+                0,
+                _config['model'],
+                task_name,
+                stage=stage,
+                duration_sec=time.time() - attempt_started,
+                success=False,
+                attempt=attempt + 1,
+                status="api_error",
+                error=str(e),
+            )
             logger.warning(f"API error (attempt {attempt + 1}): {e}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
@@ -486,52 +611,6 @@ COPY ./task_file /app/task_file
 
 Please output only Dockerfile content, wrapped with ```dockerfile```."""
 
-DIFFICULTY_PROMPT_TEMPLATE = """Assess the difficulty of the following terminal/programming task for an experienced software engineer.
-
-**Task instruction:**
-{instruction}
-
-**Tags:** {tags}
-
-**Difficulty levels:**
-- **easy**: Single-command or simple script. < 5 minutes.
-- **medium**: Multiple tools or multi-step script. 5-15 minutes.
-- **hard**: Deep domain knowledge or complex logic. > 15 minutes.
-
-Respond with ONLY one word: easy, medium, or hard."""
-
-TEST_REVIEW_PROMPT_TEMPLATE = """Review this pytest test file for a Terminal Bench task. The test runs AFTER solve.sh has already been executed.
-
-**Task instruction:**
-{instruction}
-
-**Environment files:**
-{env_file_list}
-
-**solve.sh (already executed):**
-```bash
-{solution}
-```
-
-**test_outputs.py to review:**
-```python
-{test_code}
-```
-
-**Check for:**
-1. Does the test try to run solve.sh via subprocess? (FORBIDDEN)
-2. Does the test check for exact path strings that may differ?
-3. Are there import errors or missing modules (only stdlib + pytest available)?
-4. Do assertions match actual behavior of solve.sh?
-
-**Respond with JSON:**
-```json
-{{
-    "pass": true/false,
-    "issues": ["issue1", ...]
-}}
-```"""
-
 
 class TaskGenerator:
     def __init__(self, question: SOQuestion, output_dir: Path, index: int = None):
@@ -588,7 +667,14 @@ class TaskGenerator:
             tags=', '.join(self.question.tags),
             body=clean_html(self.question.body)
         )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=TEMP_INSTRUCTION, check_truncation=True, task_name=self.task_name)
+        response = call_llm_api(
+            prompt,
+            SYSTEM_PROMPT,
+            temperature=TEMP_INSTRUCTION,
+            check_truncation=True,
+            task_name=self.task_name,
+            stage="instruction",
+        )
         if not response:
             return None
         response_stripped = response.strip()
@@ -608,7 +694,13 @@ class TaskGenerator:
             title=self.question.title,
             tags=', '.join(self.question.tags)
         )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=TEMP_ENVIRONMENT, task_name=self.task_name)
+        response = call_llm_api(
+            prompt,
+            SYSTEM_PROMPT,
+            temperature=TEMP_ENVIRONMENT,
+            task_name=self.task_name,
+            stage="environment",
+        )
         if not response:
             return {"files": {}, "directories": ["task_file"]}
         match = re.search(r'```json\n?(.*?)```', response, re.DOTALL)
@@ -640,7 +732,13 @@ class TaskGenerator:
             tags=', '.join(self.question.tags),
             env_file_list=self._format_env_file_list(env_data),
         )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=TEMP_SOLUTION, task_name=self.task_name)
+        response = call_llm_api(
+            prompt,
+            SYSTEM_PROMPT,
+            temperature=TEMP_SOLUTION,
+            task_name=self.task_name,
+            stage="solution",
+        )
         if not response:
             return None
         match = re.search(r'```bash\n?(.*?)```', response, re.DOTALL)
@@ -662,7 +760,13 @@ class TaskGenerator:
                 solution=solution,
                 tags=', '.join(self.question.tags),
             )
-            response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=TEMP_TESTS, task_name=self.task_name)
+            response = call_llm_api(
+                prompt,
+                SYSTEM_PROMPT,
+                temperature=TEMP_TESTS,
+                task_name=self.task_name,
+                stage="tests",
+            )
             if not response:
                 continue
 
@@ -690,43 +794,76 @@ class TaskGenerator:
 
             review = self._review_tests(instruction, env_file_list, solution, test_py)
             if review.get("pass"):
+                logger.info(f"[{self.task_name}] test review passed (round {attempt + 1})")
                 return test_data
             else:
-                candidates.append((test_data, review.get("issues", [])))
+                issues = review.get("issues", [])
+                logger.warning(f"[{self.task_name}] test review rejected (round {attempt + 1}): {issues}")
+                candidates.append((test_data, issues))
 
         if candidates:
             return candidates[0][0]
         return None
 
     def _review_tests(self, instruction: str, env_file_list: str, solution: str, test_code: str) -> dict:
-        prompt = TEST_REVIEW_PROMPT_TEMPLATE.format(
-            instruction=instruction,
-            env_file_list=env_file_list,
-            solution=solution,
-            test_code=test_code
-        )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=0.1, task_name=self.task_name, max_tokens=2048)
-        if not response:
-            return {"pass": True, "issues": []}
-        match = re.search(r'```json\n?(.*?)```', response, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
+        issues = []
         try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            if '"pass": true' in response.lower():
-                return {"pass": True, "issues": []}
-            return {"pass": False, "issues": ["Failed to parse review response"]}
+            tree = ast.parse(test_code)
+        except SyntaxError as exc:
+            return {"pass": False, "issues": [f"Python syntax error: {exc.msg}"]}
+
+        forbidden_runners = {
+            "run",
+            "call",
+            "check_call",
+            "check_output",
+            "Popen",
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                func_name = None
+                owner_name = None
+                if isinstance(func, ast.Attribute):
+                    func_name = func.attr
+                    if isinstance(func.value, ast.Name):
+                        owner_name = func.value.id
+                elif isinstance(func, ast.Name):
+                    func_name = func.id
+                call_text = ast.get_source_segment(test_code, node) or ""
+                if "solve.sh" in call_text and (
+                    (owner_name == "subprocess" and func_name in forbidden_runners)
+                    or (owner_name == "os" and func_name in {"system", "popen"})
+                    or func_name in {"system", "popen"}
+                ):
+                    issues.append("test_outputs.py must not execute solve.sh")
+
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                module_names = []
+                if isinstance(node, ast.Import):
+                    module_names = [alias.name.split(".", 1)[0] for alias in node.names]
+                elif node.module:
+                    module_names = [node.module.split(".", 1)[0]]
+                for module_name in module_names:
+                    if module_name == "pytest":
+                        continue
+                    if module_name not in sys.stdlib_module_names:
+                        issues.append(f"non-stdlib import in test_outputs.py: {module_name}")
+
+        return {"pass": not issues, "issues": issues}
 
     def _generate_dockerfile(self, instruction: str) -> str:
         prompt = DOCKERFILE_PROMPT_TEMPLATE.format(
             instruction=instruction,
             tags=', '.join(self.question.tags),
         )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=TEMP_DOCKERFILE, task_name=self.task_name)
+        response = call_llm_api(
+            prompt,
+            SYSTEM_PROMPT,
+            temperature=TEMP_DOCKERFILE,
+            task_name=self.task_name,
+            stage="dockerfile",
+        )
         if not response:
             return self._default_dockerfile()
         match = re.search(r'```dockerfile\n?(.*?)```', response, re.DOTALL)
@@ -738,23 +875,17 @@ class TaskGenerator:
         return self._default_dockerfile()
 
     def _assess_difficulty(self, instruction: str) -> str:
-        prompt = DIFFICULTY_PROMPT_TEMPLATE.format(
-            instruction=instruction,
-            tags=', '.join(self.question.tags)
-        )
-        response = call_llm_api(prompt, SYSTEM_PROMPT, temperature=0.1, task_name=self.task_name, max_tokens=16)
-        if response:
-            word = response.strip().lower().rstrip('.')
-            if word in ("easy", "medium", "hard"):
-                return word
-            for level in ("easy", "medium", "hard"):
-                if level in word:
-                    return level
-        if self.question.score > 500:
+        body = clean_html(self.question.body)
+        answer = clean_html(self.question.accepted_answer_body or "")
+        body_len = len(body)
+        context_len = body_len + len(answer)
+        code_blocks = body.count("```") // 2
+
+        if body_len <= 1200 and context_len <= 3000 and code_blocks <= 1:
             return "easy"
-        elif self.question.score > 100:
-            return "medium"
-        return "hard"
+        if body_len >= 5000 or context_len >= 10000 or code_blocks >= 4:
+            return "hard"
+        return "medium"
 
     def _default_dockerfile(self) -> str:
         return """FROM ubuntu:22.04

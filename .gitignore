@@ -1,5 +1,8 @@
 .env
 data/
+terminal-lego-work/
+.venv/
+/materialize_solution.md
 *.log
 api_token_usage.json
 __pycache__/

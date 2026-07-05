@@ -124,7 +124,6 @@ AGENT=terminus-2 \
 MODEL_NAME=openai/glm-5.2-fp8 \
 OPENAI_API_BASE=http://localhost:30002/v1 \
 OPENAI_API_KEY=EMPTY \
-MATERIALIZE_INSTRUCTION=/home/avzavodov/projects/swe-lego/materialize_solution.md \
 scripts/generate_solutions.sh \
     ./data/validated_r1 \
     ./data/solution_runs

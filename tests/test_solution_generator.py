@@ -140,10 +140,14 @@ def test_build_job_config_rejects_missing_task_path(tmp_path: Path) -> None:
 def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
     job_dir = tmp_path / "job"
     accepted = job_dir / "trial-a"
+    accepted_timeout = job_dir / "trial-timeout"
+    failed_missing_solution = job_dir / "trial-missing-solve-sh"
     failed = job_dir / "trial-b"
     bad = job_dir / "trial-bad"
     (accepted / "agent").mkdir(parents=True)
     (accepted / "artifacts" / "logs" / "artifacts").mkdir(parents=True)
+    (accepted_timeout / "artifacts" / "logs" / "artifacts").mkdir(parents=True)
+    failed_missing_solution.mkdir(parents=True)
     failed.mkdir(parents=True)
     bad.mkdir(parents=True)
 
@@ -162,6 +166,34 @@ def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
         "#!/bin/bash\n",
         encoding="utf-8",
     )
+    (accepted_timeout / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task_timeout",
+                "trial_name": "trial-timeout",
+                "verifier_result": {"rewards": {"reward": 1.0}},
+                "exception_info": {"exception_type": "AgentTimeoutError"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (
+        accepted_timeout
+        / "artifacts"
+        / "logs"
+        / "artifacts"
+        / "solve.sh"
+    ).write_text("#!/bin/bash\n", encoding="utf-8")
+    (failed_missing_solution / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task_missing_solution",
+                "trial_name": "trial-missing-solve-sh",
+                "verifier_result": {"rewards": {"reward": 1.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
     (failed / "result.json").write_text(
         json.dumps(
             {
@@ -177,18 +209,39 @@ def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
 
     assert sg.reward_from_result({"verifier_result": {"rewards": {"reward": "0.5"}}}) == 0.5
     assert sg.reward_from_result({"verifier_result": {"rewards": {"reward": "nan"}}}) is None
+    assert sg.exception_type_from_result({"exception_info": {"type": "AgentTimeoutError"}}) == "AgentTimeoutError"
 
     results = list(sg.iter_trial_results(job_dir))
-    assert [item["trial_dir"].name for item in results] == ["trial-a", "trial-b"]
+    assert [item["trial_dir"].name for item in results] == [
+        "trial-a",
+        "trial-b",
+        "trial-missing-solve-sh",
+        "trial-timeout",
+    ]
 
     summary = sg.summarize_job(job_dir, reward_threshold=1.0)
 
-    assert summary["total_trials"] == 2
-    assert summary["accepted_trials"] == 1
-    assert summary["failed_trials"] == 1
+    assert summary["total_trials"] == 4
+    assert summary["accepted_trials"] == 2
+    assert summary["failed_trials"] == 2
     assert Path(summary["summary_path"]).exists()
-    assert Path(summary["accepted_trajectories_path"]).read_text(encoding="utf-8").count("\n") == 1
-    assert Path(summary["failed_trials_path"]).read_text(encoding="utf-8").count("\n") == 1
+    accepted_rows = [
+        json.loads(line)
+        for line in Path(summary["accepted_trajectories_path"]).read_text(encoding="utf-8").splitlines()
+    ]
+    failed_rows = [
+        json.loads(line)
+        for line in Path(summary["failed_trials_path"]).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(accepted_rows) == 2
+    assert len(failed_rows) == 2
+    timeout_row = next(row for row in accepted_rows if row["task_name"] == "task_timeout")
+    assert timeout_row["accepted_with_timeout"] is True
+    assert timeout_row["original_exception_type"] == "AgentTimeoutError"
+    missing_solution_row = next(
+        row for row in failed_rows if row["task_name"] == "task_missing_solution"
+    )
+    assert missing_solution_row["rejection_reason"] == "reward_threshold_met_missing_solve_sh"
 
 
 def test_parse_args_exposes_dry_run_and_harbor_options(tmp_path: Path) -> None:

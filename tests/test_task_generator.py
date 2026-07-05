@@ -77,6 +77,46 @@ def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
     assert "..." in listing
 
 
+def test_token_tracker_records_stage_telemetry(tmp_path: Path) -> None:
+    usage_path = tmp_path / "usage.json"
+    tracker = tg.TokenTracker(str(usage_path))
+
+    tracker.record(
+        10,
+        5,
+        model="model",
+        task_name="task_00001",
+        stage="instruction",
+        duration_sec=1.25,
+        success=True,
+        attempt=1,
+        status="ok",
+    )
+    tracker.record(
+        0,
+        0,
+        model="model",
+        task_name="task_00001",
+        stage="tests",
+        duration_sec=2.5,
+        success=False,
+        attempt=2,
+        status="timeout",
+        error="request timeout",
+    )
+
+    data = json.loads(usage_path.read_text(encoding="utf-8"))
+    assert data["call_count"] == 2
+    assert data["success_count"] == 1
+    assert data["failure_count"] == 1
+    assert data["total_tokens"] == 15
+    assert data["by_stage"]["instruction"]["total_tokens"] == 15
+    assert data["by_stage"]["instruction"]["success_count"] == 1
+    assert data["by_stage"]["tests"]["failure_count"] == 1
+    assert data["records"][0]["stage"] == "instruction"
+    assert data["records"][1]["status"] == "timeout"
+
+
 def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     generator = tg.TaskGenerator(make_question(), tmp_path)
 
@@ -104,8 +144,54 @@ def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "```dockerfile\nFROM ubuntu:22.04\n```")
     assert generator._generate_dockerfile("instruction") == "FROM ubuntu:22.04"
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "This is medium.")
-    assert generator._assess_difficulty("instruction") == "medium"
+    assert generator._assess_difficulty("instruction") == "easy"
+
+
+def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fail_call(*args, **kwargs):
+        raise AssertionError("difficulty should not call the LLM")
+
+    monkeypatch.setattr(tg, "call_llm_api", fail_call)
+
+    assert tg.TaskGenerator(
+        make_question(tags=["json"], categories=["data-processing"], score=600),
+        tmp_path,
+    )._assess_difficulty("Short JSON conversion task") == "easy"
+
+    assert tg.TaskGenerator(
+        make_question(tags=["cuda"], categories=["machine-learning"]),
+        tmp_path,
+    )._assess_difficulty("Check the installed CUDA version") == "easy"
+
+    assert tg.TaskGenerator(
+        make_question(
+            body="<p>" + ("x" * 2000) + "</p>",
+            accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
+            tags=["python"],
+            categories=["software-engineering"],
+        ),
+        tmp_path,
+    )._assess_difficulty("Implement a multi-step script") == "medium"
+
+    assert tg.TaskGenerator(
+        make_question(
+            body="<p>" + ("x" * 5000) + "</p>",
+            accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
+            tags=["bash"],
+            categories=["system-administration"],
+        ),
+        tmp_path,
+    )._assess_difficulty("Inspect a long shell task") == "hard"
+
+    assert tg.TaskGenerator(
+        make_question(
+            body="<pre><code>a</code></pre>" * 4,
+            accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
+            tags=["json"],
+            categories=["data-processing"],
+        ),
+        tmp_path,
+    )._assess_difficulty("Inspect several snippets") == "hard"
 
 
 def test_generate_environment_and_dockerfile_fallbacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -116,13 +202,12 @@ def test_generate_environment_and_dockerfile_fallbacks(monkeypatch: pytest.Monke
     assert generator._generate_dockerfile("instruction").startswith("FROM ubuntu:22.04")
 
 
-def test_generate_tests_retries_syntax_and_uses_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     generator = tg.TaskGenerator(make_question(), tmp_path)
     responses = iter(
         [
             json.dumps({"test_sh": "run", "test_outputs_py": "def broken("}),
             json.dumps({"test_sh": "run", "test_outputs_py": "def test_ok():\n    assert True\n"}),
-            json.dumps({"pass": True, "issues": []}),
         ]
     )
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: next(responses))
@@ -136,14 +221,30 @@ def test_generate_tests_retries_syntax_and_uses_review(monkeypatch: pytest.Monke
     assert test_data == {"test_sh": "run", "test_outputs_py": "def test_ok():\n    assert True\n"}
 
 
-def test_review_tests_parsing_and_fallbacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_review_tests_is_static_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fail_call(*args, **kwargs):
+        raise AssertionError("test review should not call the LLM")
+
     generator = tg.TaskGenerator(make_question(), tmp_path)
+    monkeypatch.setattr(tg, "call_llm_api", fail_call)
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: '```json\n{"pass": false, "issues": ["x"]}\n```')
-    assert generator._review_tests("i", "env", "s", "code") == {"pass": False, "issues": ["x"]}
+    assert generator._review_tests("i", "env", "s", "import os\n\ndef test_ok():\n    assert True\n") == {
+        "pass": True,
+        "issues": [],
+    }
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "The result is \"pass\": true")
-    assert generator._review_tests("i", "env", "s", "code") == {"pass": True, "issues": []}
+    rerun_review = generator._review_tests(
+        "i",
+        "env",
+        "s",
+        'import subprocess\n\ndef test_bad():\n    subprocess.run(["bash", "solve.sh"])\n',
+    )
+    assert rerun_review["pass"] is False
+    assert "test_outputs.py must not execute solve.sh" in rerun_review["issues"]
+
+    import_review = generator._review_tests("i", "env", "s", "import pandas\n")
+    assert import_review["pass"] is False
+    assert "non-stdlib import in test_outputs.py: pandas" in import_review["issues"]
 
 
 def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:

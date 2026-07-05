@@ -217,6 +217,45 @@ def reward_from_result(result: Dict[str, Any]) -> Optional[float]:
     return reward
 
 
+def exception_type_from_result(result: Dict[str, Any]) -> Optional[str]:
+    exception_info = result.get("exception_info")
+    if not exception_info:
+        return None
+    if isinstance(exception_info, dict):
+        value = exception_info.get("exception_type") or exception_info.get("type")
+        return str(value or "Exception")
+    return type(exception_info).__name__
+
+
+def classify_solution_trial(
+    reward: Optional[float],
+    reward_threshold: float,
+    materialized_solution_exists: bool,
+    exception_type: Optional[str],
+) -> Dict[str, Any]:
+    if reward is not None and reward >= reward_threshold and materialized_solution_exists:
+        accepted_with_timeout = exception_type == "AgentTimeoutError"
+        return {
+            "accepted": True,
+            "accepted_with_timeout": accepted_with_timeout,
+            "original_exception_type": exception_type if accepted_with_timeout else None,
+            "rejection_reason": None,
+        }
+    if reward is not None and reward >= reward_threshold and not materialized_solution_exists:
+        return {
+            "accepted": False,
+            "accepted_with_timeout": False,
+            "original_exception_type": None,
+            "rejection_reason": "reward_threshold_met_missing_solve_sh",
+        }
+    return {
+        "accepted": False,
+        "accepted_with_timeout": False,
+        "original_exception_type": None,
+        "rejection_reason": None,
+    }
+
+
 def iter_trial_results(job_dir: Path) -> Iterable[Dict[str, Any]]:
     for result_path in sorted(job_dir.glob("*/result.json")):
         try:
@@ -243,17 +282,29 @@ def summarize_job(job_dir: Path, reward_threshold: float) -> Dict[str, Any]:
         trajectory_path = trial_dir / "agent" / "trajectory.json"
         materialized_solution_path = trial_dir / "artifacts" / "logs" / "artifacts" / "solve.sh"
         exception_info = result.get("exception_info")
+        exception_type = exception_type_from_result(result)
+        materialized_solution_exists = materialized_solution_path.exists()
+        classification = classify_solution_trial(
+            reward,
+            reward_threshold,
+            materialized_solution_exists,
+            exception_type,
+        )
         row = {
             "task_name": result.get("task_name"),
             "trial_name": result.get("trial_name"),
             "reward": reward,
-            "accepted": reward is not None and reward >= reward_threshold,
+            "accepted": classification["accepted"],
+            "accepted_with_timeout": classification["accepted_with_timeout"],
+            "original_exception_type": classification["original_exception_type"],
+            "rejection_reason": classification["rejection_reason"],
+            "exception_type": exception_type,
             "exception_info": exception_info,
             "result_path": str(result_path),
             "trajectory_path": str(trajectory_path) if trajectory_path.exists() else None,
             "materialized_solution_path": (
                 str(materialized_solution_path)
-                if materialized_solution_path.exists()
+                if materialized_solution_exists
                 else None
             ),
         }
