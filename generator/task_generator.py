@@ -29,6 +29,11 @@ from typing import Optional, List, Dict, Any
 import threading
 import requests
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
+    tomllib = None
+
 # ============================================================================
 # Configuration (defaults, overridable via CLI/env)
 # ============================================================================
@@ -40,11 +45,11 @@ RETRY_DELAY = 2
 REQUEST_TIMEOUT = 300
 REQUEST_INTERVAL = 0.2
 
-TEMP_INSTRUCTION = 0.7
-TEMP_ENVIRONMENT = 0.3
-TEMP_SOLUTION = 0.3
-TEMP_TESTS = 0.2
-TEMP_DOCKERFILE = 0.3
+TEMP_INSTRUCTION = None
+TEMP_ENVIRONMENT = None
+TEMP_SOLUTION = None
+TEMP_TESTS = None
+TEMP_DOCKERFILE = None
 
 # ============================================================================
 # Logging
@@ -254,6 +259,139 @@ def clean_html(html_content: str) -> str:
     return text.strip()
 
 
+STACKOVERFLOW_QUESTION_URL_RE = re.compile(r"stackoverflow\.com/(?:questions|q)/(\d+)")
+TASK_DIR_RE = re.compile(r"^task_(\d+)$")
+
+REQUIRED_COMPLETE_TASK_FILES = (
+    "task.toml",
+    "instruction.md",
+    "environment/Dockerfile",
+    "solution/solve.sh",
+    "tests/test.sh",
+    "tests/test_outputs.py",
+)
+
+
+def _extract_question_id_from_source_url(source_url: str) -> Optional[int]:
+    match = STACKOVERFLOW_QUESTION_URL_RE.search(source_url or "")
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _extract_source_question_id_from_task_toml(task_toml: Path) -> Optional[int]:
+    try:
+        text = task_toml.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    if tomllib is not None:
+        try:
+            metadata = tomllib.loads(text).get("metadata", {})
+            source_question_id = metadata.get("source_question_id")
+            if source_question_id is not None:
+                return int(source_question_id)
+            source_url = metadata.get("source_url")
+            return _extract_question_id_from_source_url(str(source_url or ""))
+        except Exception:
+            pass
+
+    id_match = re.search(r"(?m)^source_question_id\s*=\s*\"?(\d+)\"?\s*$", text)
+    if id_match:
+        return int(id_match.group(1))
+
+    url_match = re.search(r'(?m)^source_url\s*=\s*"([^"]+)"\s*$', text)
+    if url_match:
+        return _extract_question_id_from_source_url(url_match.group(1))
+    return None
+
+
+def _is_complete_task_dir(task_dir: Path) -> bool:
+    return all((task_dir / relative_path).is_file() for relative_path in REQUIRED_COMPLETE_TASK_FILES)
+
+
+def _collect_existing_question_ids(output_dir: Path) -> Dict[int, Path]:
+    question_ids: Dict[int, Path] = {}
+    if not output_dir.exists():
+        return question_ids
+
+    for task_dir in sorted(output_dir.glob("task_*")):
+        if not task_dir.is_dir() or not _is_complete_task_dir(task_dir):
+            continue
+        question_id = _extract_source_question_id_from_task_toml(task_dir / "task.toml")
+        if question_id is not None:
+            question_ids.setdefault(question_id, task_dir)
+    return question_ids
+
+
+def _find_next_task_index(output_dir: Path) -> int:
+    max_index = -1
+    if output_dir.exists():
+        for task_dir in output_dir.glob("task_*"):
+            if not task_dir.is_dir():
+                continue
+            match = TASK_DIR_RE.match(task_dir.name)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+    return max_index + 1
+
+
+def _build_task_args(
+    questions: List[dict],
+    output_dir: Path,
+    start: int = 0,
+    limit: Optional[int] = None,
+    resume: bool = False,
+) -> tuple[list[tuple], dict]:
+    indexed_questions = list(enumerate(questions))
+    indexed_questions = indexed_questions[start:]
+    if limit:
+        indexed_questions = indexed_questions[:limit]
+
+    resume_info = {
+        "enabled": resume,
+        "existing_complete_tasks": 0,
+        "existing_question_ids": 0,
+        "skipped_existing_questions": 0,
+        "next_task_index": None,
+    }
+
+    if resume:
+        existing_question_ids = _collect_existing_question_ids(output_dir)
+        next_task_index = _find_next_task_index(output_dir)
+        resume_info.update({
+            "existing_complete_tasks": len(existing_question_ids),
+            "existing_question_ids": len(existing_question_ids),
+            "next_task_index": next_task_index,
+        })
+
+        pending_questions = []
+        skipped_existing = 0
+        for _original_index, question in indexed_questions:
+            try:
+                question_id = int(question.get("question_id"))
+            except (TypeError, ValueError):
+                question_id = None
+            if question_id is not None and question_id in existing_question_ids:
+                skipped_existing += 1
+                continue
+            pending_questions.append(question)
+
+        resume_info["skipped_existing_questions"] = skipped_existing
+        total_count = len(pending_questions)
+        task_args = [
+            (question, output_dir, total_count, next_task_index + offset)
+            for offset, question in enumerate(pending_questions)
+        ]
+        return task_args, resume_info
+
+    total_count = len(indexed_questions)
+    return [
+        (question, output_dir, total_count, original_index)
+        for original_index, question in indexed_questions
+    ], resume_info
+
+
 # ============================================================================
 # LLM API
 # ============================================================================
@@ -289,11 +427,11 @@ def _is_truncated(content: str) -> bool:
 def call_llm_api(
     prompt: str,
     system_prompt: str = None,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     check_truncation: bool = False,
     task_name: str = None,
     stage: str = None,
-    max_tokens: int = 16384,
+    max_tokens: Optional[int] = None,
 ) -> Optional[str]:
     global _last_request_time
 
@@ -310,9 +448,11 @@ def call_llm_api(
     payload = {
         "model": _config['model'],
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
 
     for attempt in range(MAX_RETRIES):
         attempt_started = time.time()
@@ -450,6 +590,139 @@ ENVIRONMENT_PROMPT_TEMPLATE = _load_prompt_template("environment.md")
 SOLUTION_PROMPT_TEMPLATE = _load_prompt_template("solution.md")
 TEST_PROMPT_TEMPLATE = _load_prompt_template("tests.md")
 DOCKERFILE_PROMPT_TEMPLATE = _load_prompt_template("dockerfile.md")
+
+TEST_OUTPUTS_FEATURE_VERSION = (3, 12)
+
+
+def _parse_test_outputs_py(test_code: str) -> ast.AST:
+    return ast.parse(test_code, feature_version=TEST_OUTPUTS_FEATURE_VERSION)
+
+
+STATIC_TEST_SH = """#!/usr/bin/env bash
+set +e
+
+mkdir -p /logs/verifier
+
+if [ "$PWD" = "/" ]; then
+    echo "Error: No working directory set."
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+find_python_with_pytest() {
+    for candidate in \
+        "${PYTHON_BIN:-}" \
+        python3.13 \
+        python3.12 \
+        /usr/local/bin/python3 \
+        python3 \
+        /usr/bin/python3
+    do
+        [ -n "$candidate" ] || continue
+
+        if command -v "$candidate" >/dev/null 2>&1; then
+            bin="$(command -v "$candidate")"
+        elif [ -x "$candidate" ]; then
+            bin="$candidate"
+        else
+            continue
+        fi
+
+        if "$bin" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 12) else 1)
+PY
+        then
+            :
+        else
+            continue
+        fi
+
+        if "$bin" -m pytest --version >/dev/null 2>&1; then
+            printf '%s\n' "$bin"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+PYTHON_BIN="$(find_python_with_pytest)"
+if [ -z "$PYTHON_BIN" ]; then
+    echo "Error: no Python 3.12+ with pytest is installed."
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+if ! "$PYTHON_BIN" -m pytest --version >/dev/null 2>&1; then
+    echo "Error: pytest is not installed for $PYTHON_BIN."
+    echo 0 > /logs/verifier/reward.txt
+    exit 1
+fi
+
+"$PYTHON_BIN" -m pytest /tests/test_outputs.py -rA
+status=$?
+
+if [ "$status" -eq 0 ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+
+exit "$status"
+"""
+
+VERIFIER_PYTHON_STAGE = """FROM python:3.12-slim-bookworm AS verifier_python
+RUN python -m pip install --no-cache-dir pytest
+"""
+
+VERIFIER_PYTHON_COPY = """COPY --from=verifier_python /usr/local /usr/local
+ENV PATH="/usr/local/bin:${PATH}"
+"""
+
+VERIFIER_PYTEST_INSTALL = "RUN python -m pip install --no-cache-dir pytest"
+
+
+def _has_python_312_plus(dockerfile: str) -> bool:
+    if re.search(r"(?im)^FROM\s+python:3\.(?:1[2-9]|[2-9][0-9])", dockerfile):
+        return True
+    if re.search(r"\bpython3\.(?:1[2-9]|[2-9][0-9])\b", dockerfile):
+        return True
+    return False
+
+
+def _has_pytest_for_verifier(dockerfile: str) -> bool:
+    return bool(
+        re.search(r"\bpython(?:3(?:\.\d+)?)?\s+-m\s+pip\s+install\b[^\n\\]*\bpytest\b", dockerfile)
+        or re.search(r"\bpip3?\s+install\b[^\n\\]*\bpytest\b", dockerfile)
+    )
+
+
+def _insert_before_task_file_copy(dockerfile: str, insertion: str) -> str:
+    copy_match = re.search(r"(?im)^COPY\s+\./task_file\s+/app/task_file\s*$", dockerfile)
+    if copy_match:
+        return (
+            dockerfile[: copy_match.start()].rstrip()
+            + "\n\n"
+            + insertion.rstrip()
+            + "\n"
+            + dockerfile[copy_match.start() :].lstrip()
+        )
+    return dockerfile.rstrip() + "\n\n" + insertion.rstrip()
+
+
+def _ensure_verifier_deps(dockerfile: str) -> str:
+    text = dockerfile.strip()
+    if _has_python_312_plus(text) and _has_pytest_for_verifier(text):
+        return text
+
+    if _has_python_312_plus(text):
+        return _insert_before_task_file_copy(text, VERIFIER_PYTEST_INSTALL)
+
+    if VERIFIER_PYTHON_STAGE in text or "AS verifier_python" in text:
+        return text
+
+    return VERIFIER_PYTHON_STAGE.rstrip() + "\n\n" + _insert_before_task_file_copy(text, VERIFIER_PYTHON_COPY)
 
 
 class TaskGenerator:
@@ -622,12 +895,15 @@ class TaskGenerator:
                     test_data = json.loads(response)
                 except json.JSONDecodeError:
                     continue
+            if not isinstance(test_data, dict):
+                continue
 
             test_py = test_data.get("test_outputs_py", "")
             if not test_py:
                 continue
+            test_data["test_sh"] = STATIC_TEST_SH
             try:
-                ast.parse(test_py)
+                _parse_test_outputs_py(test_py)
             except SyntaxError as e:
                 logger.warning(f"[{self.task_name}] ast.parse failed (round {attempt + 1}): {e.msg}")
                 continue
@@ -648,7 +924,7 @@ class TaskGenerator:
     def _review_tests(self, instruction: str, env_file_list: str, solution: str, test_code: str) -> dict:
         issues = []
         try:
-            tree = ast.parse(test_code)
+            tree = _parse_test_outputs_py(test_code)
         except SyntaxError as exc:
             return {"pass": False, "issues": [f"Python syntax error: {exc.msg}"]}
 
@@ -708,11 +984,11 @@ class TaskGenerator:
             return self._default_dockerfile()
         match = re.search(r'```dockerfile\n?(.*?)```', response, re.DOTALL)
         if match:
-            return match.group(1).strip()
+            return _ensure_verifier_deps(match.group(1))
         match = re.search(r'```\n?(.*?)```', response, re.DOTALL)
         if match:
-            return match.group(1).strip()
-        return self._default_dockerfile()
+            return _ensure_verifier_deps(match.group(1))
+        return _ensure_verifier_deps(self._default_dockerfile())
 
     def _assess_difficulty(self, instruction: str) -> str:
         body = clean_html(self.question.body)
@@ -728,12 +1004,14 @@ class TaskGenerator:
         return "medium"
 
     def _default_dockerfile(self) -> str:
-        return """FROM ubuntu:22.04
+        return """FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \\
     bash coreutils findutils grep sed gawk curl wget git \\
     && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir pytest
 
 COPY ./task_file /app/task_file
 """
@@ -771,6 +1049,7 @@ difficulty = {self._toml_quote(difficulty)}
 category = {self._toml_quote(category)}
 tags = [{tags_str}]
 categories = [{categories_str}]
+source_question_id = {int(self.question.question_id)}
 source_url = {self._toml_quote(self.question.link)}
 source_score = {self.question.score}
 
@@ -805,9 +1084,13 @@ storage = "5G"
             full_path.write_text(content, encoding='utf-8')
 
         (self.task_dir / "tests" / "__init__.py").write_text("", encoding='utf-8')
-        (self.task_dir / "tests" / "test.sh").write_text(test_data.get("test_sh", ""), encoding='utf-8')
+        test_sh_path = self.task_dir / "tests" / "test.sh"
+        solve_sh_path = self.task_dir / "solution" / "solve.sh"
+        test_sh_path.write_text(STATIC_TEST_SH, encoding='utf-8')
         (self.task_dir / "tests" / "test_outputs.py").write_text(test_data.get("test_outputs_py", ""), encoding='utf-8')
-        (self.task_dir / "solution" / "solve.sh").write_text(solution, encoding='utf-8')
+        solve_sh_path.write_text(solution, encoding='utf-8')
+        test_sh_path.chmod(0o755)
+        solve_sh_path.chmod(0o755)
 
         logger.info(f"[{self.task_name}] Written to: {self.task_dir}")
 
@@ -841,6 +1124,15 @@ def main():
     parser.add_argument('--workers', '-w', type=int, default=16, help='Parallel worker threads')
     parser.add_argument('--limit', '-l', type=int, default=None, help='Limit questions to process')
     parser.add_argument('--start', '-s', type=int, default=0, help='Start index')
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help=(
+            'Skip input questions whose StackOverflow question_id already exists '
+            'in complete tasks under the output directory. New tasks are written '
+            'after the highest existing task_XXXXX index.'
+        ),
+    )
     parser.add_argument('--api-base', type=str, default=None, help='API base URL')
     parser.add_argument('--api-key', type=str, default=None, help='API key')
     parser.add_argument('--model', type=str, default=None, help='Model name')
@@ -864,17 +1156,26 @@ def main():
     questions = [q for q in data['questions'] if q.get('accepted_answer')]
     logger.info(f"Found {len(questions)} questions with accepted answers (of {len(data['questions'])} total)")
 
-    questions = questions[args.start:]
-    if args.limit:
-        questions = questions[:args.limit]
-
-    logger.info(f"Processing {len(questions)} questions (start={args.start})")
-
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    total_count = len(questions)
-    task_args = [(q, output_dir, total_count, args.start + i) for i, q in enumerate(questions)]
+    task_args, resume_info = _build_task_args(
+        questions,
+        output_dir,
+        start=args.start,
+        limit=args.limit,
+        resume=args.resume,
+    )
+    total_count = len(task_args)
+
+    if args.resume:
+        logger.info(
+            "Resume enabled: skipped %s existing question ids, next task index is %s",
+            resume_info["skipped_existing_questions"],
+            resume_info["next_task_index"],
+        )
+
+    logger.info(f"Processing {total_count} questions (start={args.start}, resume={args.resume})")
 
     start_time = time.time()
     success_count = 0
@@ -902,6 +1203,7 @@ def main():
         "success_count": success_count,
         "error_count": error_counter.value,
         "skip_count": skip_counter.value,
+        "resume": resume_info,
         "elapsed_seconds": elapsed,
         "model": _config['model'],
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

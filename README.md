@@ -15,21 +15,15 @@
 <a href="https://stephen0808.github.io/terminal-lego.github.io/#" > 📖 Project</a>
 </p>
 
-## 1. 🔭 Pipeline Overview
+## 1. Quick Start
 
- <p align="center">
-    <img src="./pipeline.jpg" width="600">
-  </p>
-
-## 2. 🚀 Quick Start
-
-### 2.1 Install dependencies
+### 1.1 Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2.2 Configure
+### 1.2 Configure
 
 ```bash
 cp .env.example .env
@@ -39,40 +33,9 @@ cp .env.example .env
 Required environment variables:
 - `OPENAI_API_KEY` — API key for an OpenAI-compatible LLM service
 - `OPENAI_API_BASE` — API base URL (default: `https://api.openai.com/v1`)
-- `SO_API_KEY` — StackOverflow API key ([get one here](https://stackapps.com/))
 - `MODEL_NAME` — Model to use (default: `claude-opus-4-6`)
 
-### 2.3 Run the full pipeline
-
-```bash
-bash run_pipeline.sh
-```
-
-This runs in a loop: scrape → generate → validate → next round.
-
-## 3. 🔧 Running Steps Individually
-
-### 3.1 Scrape StackOverflow
-
-```bash
-python scraper/so_scraper.py \
-    --round 1 \
-    --output ./data \
-    --count 5000 \
-    --api-key "$SO_API_KEY"
-```
-
-### 3.2 Generate Tasks
-
-```bash
-python generator/task_generator.py \
-    --input ./data/so_data_r1.json \
-    --output ./data/candidates_r1 \
-    --workers 16 \
-    --model claude-opus-4-6
-```
-
-### 3.2a Prepare StackOverflow dump JSONL
+## 2. Generate Tasks From StackOverflow JSONL
 
 For local StackOverflow dumps, use `stackoverflow/prepare_dataset.py` before
 task generation. It reads dump-derived JSONL rows, classifies rows into
@@ -105,7 +68,21 @@ python stackoverflow/prepare_dataset.py \
 The tag taxonomy and benchmark distribution are in
 `stackoverflow/terminal_bench_tag_taxonomy.json`.
 
-### 3.3 Validate Tasks (requires Docker)
+For task generation from StackOverflow JSONL, the convenience wrapper is:
+
+```bash
+PER_CATEGORY=2 \
+MODEL_NAME=openai/glm-5.2-fp8 \
+OPENAI_API_BASE=http://localhost:30002/v1 \
+OPENAI_API_KEY=EMPTY \
+scripts/generate_tasks.sh \
+    /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
+    ./data/so_smoke
+```
+
+## 3. Validate Tasks
+
+Validation requires Docker.
 
 ```bash
 python validator/validate_tasks.py \
@@ -115,7 +92,7 @@ python validator/validate_tasks.py \
     --timeout 300
 ```
 
-### 3.4 Generate Agent Solution Rollouts
+## 4. Generate Agent Solution Rollouts
 
 After validation, run Harbor-supported agents on accepted task directories:
 
@@ -155,19 +132,7 @@ failed_trials.jsonl
 <trial_name>/verifier/reward.txt
 ```
 
-For task generation from StackOverflow JSONL, the convenience wrapper is:
-
-```bash
-PER_CATEGORY=2 \
-MODEL_NAME=openai/glm-5.2-fp8 \
-OPENAI_API_BASE=http://localhost:30002/v1 \
-OPENAI_API_KEY=EMPTY \
-scripts/generate_tasks.sh \
-    /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
-    ./data/so_smoke
-```
-
-## 4. 📦 Output Format
+## 5. Output Format
 
 Each generated task has this structure:
 
@@ -185,23 +150,21 @@ task_00001/
     └── test_outputs.py     # pytest assertions
 ```
 
-## 5. ⚙️ Configuration
+## 6. Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CRAWL_COUNT` | 5000 | Questions to crawl per round |
-| `GEN_WORKERS` | 16 | Parallel threads for generation |
+| `WORKERS` | 1 | Parallel threads for task generation wrapper |
 | `VAL_WORKERS` | 8 | Parallel threads for validation |
 | `VAL_TIMEOUT` | 300 | Docker timeout per step (seconds) |
 | `MODEL_NAME` | claude-opus-4-6 | LLM model name |
 
-## 6. 📋 Requirements
+## 7. Requirements
 
 - Python 3.10+
 - Docker (for validation step)
 - An OpenAI-compatible API endpoint
-- StackOverflow API key (optional, increases rate limits)
 
-## 7. 📄 License
+## 8. License
 
 MIT

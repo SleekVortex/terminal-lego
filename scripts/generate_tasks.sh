@@ -16,6 +16,7 @@ Environment:
   DISTRIBUTION           Distribution name for SAMPLE_SIZE. Default: terminal-bench-2
   LIMIT                  Optional first/top rows limit.
   START                  Optional start offset for first rows mode. Default: 0
+  RESUME                 1 to skip questions already present in complete output tasks.
   SORT_BY_SCORE          1 to rank by SO score. Default: 1
   WORKERS                Task generator workers. Default: 1
   MODEL_NAME             LLM model for task generation.
@@ -99,8 +100,11 @@ if [[ -n "${MODEL_NAME:-}" ]]; then
   generator_args+=(--model "${MODEL_NAME}")
 fi
 
+if [[ "${RESUME:-0}" == "1" ]]; then
+  generator_args+=(--resume)
+fi
+
 python "${REPO_DIR}/generator/task_generator.py" "${generator_args[@]}" "$@"
 
 echo "Seed: ${SEED_JSON}"
 echo "Candidates: ${CANDIDATES_DIR}"
-

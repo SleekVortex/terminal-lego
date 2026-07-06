@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
 from generator import solution_generator as sg
+from generator.agents.preinstalled_opencode import (
+    OPENCODE_SYSTEM_PROMPT,
+    PreinstalledOpenCode,
+)
 
 
 def test_parse_scalar_and_key_value_items() -> None:
@@ -129,6 +134,40 @@ def test_build_job_config_for_single_task_and_dataset(tmp_path: Path) -> None:
     assert dataset_config["datasets"][0]["exclude_task_names"] == ["task_b"]
     assert dataset_config["datasets"][0]["n_tasks"] == 3
     assert not dataset_config["tasks"]
+
+
+def test_build_job_config_uses_import_path_for_preinstalled_opencode(
+    tmp_path: Path,
+) -> None:
+    single_task = tmp_path / "task_00000"
+    single_task.mkdir()
+    (single_task / "task.toml").write_text('version = "1.0"\n', encoding="utf-8")
+
+    args = sg.parse_args(
+        [
+            "--tasks-dir",
+            str(single_task),
+            "--jobs-dir",
+            str(tmp_path / "jobs"),
+            "--agent",
+            "preinstalled-opencode",
+            "--model",
+            "openai/glm",
+            "--api-base",
+            "http://host.docker.internal:30003/v1",
+            "--api-key",
+            "EMPTY",
+        ]
+    )
+
+    config = sg.build_job_config(args)
+    agent = config.agents[0]
+
+    assert agent.name is None
+    assert agent.import_path == sg.PREINSTALLED_OPENCODE_IMPORT_PATH
+    assert agent.model_name == "openai/glm"
+    assert agent.kwargs["api_base"] == "http://host.docker.internal:30003/v1"
+    assert agent.kwargs["api_key"] == "EMPTY"
 
 
 def test_build_job_config_rejects_missing_task_path(tmp_path: Path) -> None:
@@ -265,3 +304,94 @@ def test_parse_args_exposes_dry_run_and_harbor_options(tmp_path: Path) -> None:
     assert args.delete is False
     assert args.agent_include_logs == ["agent.log"]
     assert args.extra_docker_compose == [tmp_path / "bridge.yaml"]
+
+
+def test_preinstalled_opencode_install_does_not_download_runtime() -> None:
+    assert PreinstalledOpenCode.name() == "preinstalled-opencode"
+    assert PreinstalledOpenCode.get_version_command(None) == "opencode --version"
+
+    source = inspect.getsource(PreinstalledOpenCode.install)
+    assert "curl" not in source
+    assert "npm" not in source
+    assert "nvm install" not in source
+    assert "/opt/terminal-lego/opencode/bin/opencode" in source
+
+
+def test_preinstalled_opencode_registers_glm_compatible_defaults() -> None:
+    defaults = PreinstalledOpenCode._DEFAULT_CONFIG
+
+    assert defaults["agent"]["title"]["disable"] is True
+
+
+def test_preinstalled_opencode_registers_glm_custom_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://host.docker.internal:30003/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "EMPTY")
+
+    agent = PreinstalledOpenCode(
+        model_name="openai/glm-5.2-fp8",
+        logs_dir=tmp_path,
+    )
+    command = agent._build_register_config_command()
+
+    assert agent.model_name == "glm/glm-5.2-fp8"
+    assert command is not None
+    assert '"model": "glm/glm-5.2-fp8"' in command
+    assert '"small_model": "glm/glm-5.2-fp8"' in command
+    assert '"glm": {' in command
+    assert '"npm": "@ai-sdk/openai-compatible"' in command
+    assert '"baseURL": "http://host.docker.internal:30003/v1"' in command
+    assert '"prompt":' in command
+    assert "Harbor/Terminal-Lego task container" in command
+    assert '"tool_call": true' in command
+    assert '"interleaved": {' in command
+    assert '"field": "reasoning_content"' in command
+
+
+def test_preinstalled_opencode_adds_system_prompt_to_trajectory(
+    tmp_path: Path,
+) -> None:
+    agent = PreinstalledOpenCode(
+        model_name="openai/glm-5.2-fp8",
+        logs_dir=tmp_path,
+    )
+    agent._instruction = "solve the task"
+
+    trajectory = agent._convert_events_to_trajectory(
+        [
+            {
+                "type": "step_start",
+                "timestamp": 1000,
+                "sessionID": "session-1",
+            },
+            {
+                "type": "text",
+                "part": {
+                    "type": "text",
+                    "text": "done",
+                },
+            },
+            {
+                "type": "step_finish",
+                "part": {
+                    "tokens": {
+                        "input": 10,
+                        "output": 2,
+                    },
+                },
+            },
+        ]
+    )
+
+    assert trajectory is not None
+    assert [step.source for step in trajectory.steps] == ["system", "user", "agent"]
+    assert [step.step_id for step in trajectory.steps] == [1, 2, 3]
+    assert trajectory.steps[0].message == OPENCODE_SYSTEM_PROMPT
+    assert trajectory.steps[0].extra == {
+        "origin": "terminal-lego.preinstalled-opencode",
+        "prompt_config": "agent.build.prompt",
+    }
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_steps == 3

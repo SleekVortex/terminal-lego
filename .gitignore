@@ -7,3 +7,6 @@ terminal-lego-work/
 api_token_usage.json
 __pycache__/
 *.pyc
+configs/opencode/runtime/
+configs/opencode/*.tar
+configs/opencode/*.tar.gz

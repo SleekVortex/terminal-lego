@@ -13,6 +13,9 @@ Environment:
   PYTHON_BIN              Python executable. Default: python3
   DOCKER_NETWORK_STRATEGY Docker network strategy. Default: bridge
                           Values: bridge, compose
+  OPENCODE_RUNTIME_DIR    Preinstalled OpenCode runtime dir for
+                          AGENT=preinstalled-opencode.
+                          Default: configs/opencode/runtime
   CLEANUP_DOCKER          Remove leftover Docker compose containers/networks
                           for this job on exit. Default: 1
   OPENAI_API_BASE         OpenAI-compatible API base.
@@ -58,6 +61,16 @@ JOB_NAME="${JOB_NAME:-solution-rollouts-$(date -u +%Y%m%dT%H%M%SZ)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DOCKER_NETWORK_STRATEGY="${DOCKER_NETWORK_STRATEGY:-bridge}"
 CLEANUP_DOCKER="${CLEANUP_DOCKER:-1}"
+OPENCODE_RUNTIME_DIR="${OPENCODE_RUNTIME_DIR:-${REPO_DIR}/configs/opencode/runtime}"
+
+if [[ "${AGENT:-terminus-2}" == "preinstalled-opencode" ]]; then
+  OPENAI_API_BASE="${OPENAI_API_BASE:-http://host.docker.internal:30003/v1}"
+fi
+
+if [[ -n "${OPENAI_API_BASE:-}" && -z "${OPENAI_BASE_URL:-}" ]]; then
+  OPENAI_BASE_URL="${OPENAI_API_BASE}"
+  export OPENAI_BASE_URL
+fi
 
 compose_project_name() {
   local name="$1"
@@ -150,6 +163,17 @@ fi
 
 if [[ -n "${OPENAI_API_BASE:-}" ]]; then
   args+=(--api-base "${OPENAI_API_BASE}")
+fi
+
+if [[ "${AGENT:-terminus-2}" == "preinstalled-opencode" ]]; then
+  if [[ ! -x "${OPENCODE_RUNTIME_DIR}/bin/opencode" ]]; then
+    echo "ERROR: AGENT=preinstalled-opencode requires executable:" >&2
+    echo "  ${OPENCODE_RUNTIME_DIR}/bin/opencode" >&2
+    echo "Build/extract it with configs/opencode/extract_runtime.sh first." >&2
+    exit 2
+  fi
+  export OPENCODE_RUNTIME_DIR
+  args+=(--extra-docker-compose "${REPO_DIR}/configs/opencode/docker-compose-runtime.yaml")
 fi
 
 case "$DOCKER_NETWORK_STRATEGY" in

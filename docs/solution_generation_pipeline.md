@@ -8,6 +8,7 @@
 - `generator/solution_generator.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
 - `prompts/solution_generator/materialize_solution.md` - extra instruction для агента: материализовать итоговое решение в `/logs/artifacts/solve.sh`.
 - `configs/harbor/docker-compose-bridge-network.yaml` - опциональный Harbor compose override для `network_mode: bridge`.
+- `configs/opencode/` - preinstalled OpenCode runtime config для запуска OpenCode без скачивания nvm/npm внутри каждого trial.
 
 ## Общая Схема
 
@@ -73,6 +74,7 @@ scripts/generate_solutions.sh TASKS_DIR [JOBS_DIR] [extra solution_generator arg
 - `DOCKER_NETWORK_STRATEGY=bridge`;
 - `CLEANUP_DOCKER=1`;
 - `MATERIALIZE_INSTRUCTION=prompts/solution_generator/materialize_solution.md`.
+- `OPENCODE_RUNTIME_DIR=configs/opencode/runtime` при `AGENT=preinstalled-opencode`.
 
 Wrapper собирает аргументы и вызывает:
 
@@ -81,6 +83,86 @@ python generator/solution_generator.py ...
 ```
 
 Все extra CLI args после `TASKS_DIR [JOBS_DIR]` пробрасываются в `solution_generator.py`.
+
+## Preinstalled OpenCode
+
+Обычный Harbor agent `opencode` устанавливает nvm, Node и `opencode-ai` внутри каждого task container. Для массовых rollouts это слишком медленно и зависит от GitHub/npm во время каждого trial.
+
+Для этого добавлен agent mode:
+
+```bash
+AGENT=preinstalled-opencode
+```
+
+Он использует Harbor `OpenCode.run()` и стандартный парсер trajectory, но заменяет сетевой install на проверку уже смонтированного runtime:
+
+```text
+/opt/terminal-lego/opencode/bin/opencode
+```
+
+Runtime собирается отдельно через `configs/opencode/Dockerfile`, переносится на `cpu`, затем извлекается в:
+
+```text
+configs/opencode/runtime/
+```
+
+Wrapper при `AGENT=preinstalled-opencode` автоматически добавляет:
+
+```text
+--extra-docker-compose configs/opencode/docker-compose-runtime.yaml
+```
+
+и проверяет, что существует executable:
+
+```text
+${OPENCODE_RUNTIME_DIR}/bin/opencode
+```
+
+Пример запуска:
+
+```bash
+AGENT=preinstalled-opencode \
+MODEL_NAME=openai/glm-5.2-fp8 \
+OPENAI_API_KEY=EMPTY \
+DOCKER_NETWORK_STRATEGY=bridge \
+scripts/generate_solutions.sh ./validated ./runs
+```
+
+Для Docker bridge нужен отдельный tunnel, который слушает Docker gateway, например:
+
+```bash
+scripts/start_opencode_docker_tunnel.sh
+```
+
+Этот tunnel не заменяет и не останавливает существующий `127.0.0.1:30002`; он добавляет отдельный listener `172.16.0.1:30003` для контейнеров.
+
+Для GLM 5.2 `PreinstalledOpenCode` регистрирует в OpenCode custom provider:
+
+- provider id: `glm`;
+- provider package: `@ai-sdk/openai-compatible`;
+- default baseURL для Docker bridge: `http://host.docker.internal:30003/v1`;
+- model: `glm/glm-5.2-fp8`;
+- `interleaved.field = reasoning_content`, чтобы OpenCode читал reasoning из streaming chunk-ов GLM.
+- `agent.build.prompt` с Terminal-Lego system prompt для solution generation.
+
+Внешний `MODEL_NAME=openai/glm-5.2-fp8` остается совместимым алиасом для остальных wrapper-ов, но перед запуском `opencode` агент меняет его на `glm/glm-5.2-fp8`. Это заставляет OpenCode использовать `/v1/chat/completions`, а не OpenAI Responses API.
+
+Если нужен другой endpoint, можно явно передать:
+
+```text
+OPENAI_API_BASE=http://host.docker.internal:30003/v1
+```
+
+Trajectory для `preinstalled-opencode` дополняется первым step-ом:
+
+```json
+{
+  "source": "system",
+  "message": "..."
+}
+```
+
+Этот system step содержит тот же текст, который записывается в OpenCode config как `agent.build.prompt`. После него идет `source=user` с task instruction, затем `source=agent` шаги из OpenCode stream. Это нужно, чтобы rollout был самодостаточным для просмотра и последующего train-data conversion.
 
 ## Materialize Solution Prompt
 
@@ -204,6 +286,14 @@ Wrapper всегда добавляет:
 --trajectory-raw-content
 --trajectory-linear-history
 ```
+
+Для `preinstalled-opencode` вместо `AgentConfig.name` используется Harbor `AgentConfig.import_path`:
+
+```text
+generator.agents.preinstalled_opencode:PreinstalledOpenCode
+```
+
+Это позволяет не patch-ить Harbor package и при этом переиспользовать его OpenCode run/trajectory implementation.
 
 ### EnvironmentConfig
 

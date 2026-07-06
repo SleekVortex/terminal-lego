@@ -18,6 +18,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+PREINSTALLED_OPENCODE_AGENT = "preinstalled-opencode"
+PREINSTALLED_OPENCODE_IMPORT_PATH = (
+    "generator.agents.preinstalled_opencode:PreinstalledOpenCode"
+)
+
 
 def parse_scalar(value: str) -> Any:
     lowered = value.lower()
@@ -124,6 +133,25 @@ def build_agent_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
     return kwargs
 
 
+def build_agent_config(args: argparse.Namespace, AgentConfig, model_name: Optional[str]):
+    kwargs = {
+        "model_name": model_name,
+        "kwargs": build_agent_kwargs(args),
+        "env": parse_env(args.agent_env),
+        "include_logs": args.agent_include_logs or [],
+        "exclude_logs": args.agent_exclude_logs or [],
+    }
+    if args.agent == PREINSTALLED_OPENCODE_AGENT:
+        return AgentConfig(
+            import_path=PREINSTALLED_OPENCODE_IMPORT_PATH,
+            **kwargs,
+        )
+    return AgentConfig(
+        name=args.agent,
+        **kwargs,
+    )
+
+
 def build_job_config(args: argparse.Namespace):
     harbor = import_harbor()
     JobConfig = harbor["JobConfig"]
@@ -139,14 +167,7 @@ def build_job_config(args: argparse.Namespace):
         raise SystemExit(f"Task path does not exist: {tasks_dir}")
 
     model_name = args.model or os.environ.get("MODEL_NAME")
-    agent = AgentConfig(
-        name=args.agent,
-        model_name=model_name,
-        kwargs=build_agent_kwargs(args),
-        env=parse_env(args.agent_env),
-        include_logs=args.agent_include_logs or [],
-        exclude_logs=args.agent_exclude_logs or [],
-    )
+    agent = build_agent_config(args, AgentConfig, model_name)
 
     environment = EnvironmentConfig(
         type=args.env,

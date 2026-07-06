@@ -131,6 +131,10 @@ PROMPT_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "prompts" / "task_ge
 - `REQUEST_TIMEOUT = 300`;
 - `REQUEST_INTERVAL = 0.2`.
 
+`max_tokens` по умолчанию не отправляется в request payload. Это снимает client-side cap на completion length и позволяет endpoint/model server самому ограничивать ответ по доступному контексту. Явный лимит все еще можно передать через `call_llm_api(..., max_tokens=...)`, если он понадобится для отдельной стадии.
+
+`temperature` по умолчанию тоже не отправляется. Все `TEMP_*` constants сейчас равны `None`, поэтому endpoint использует свои sampler defaults. Явную температуру можно вернуть для отдельной стадии, передав `call_llm_api(..., temperature=...)` или поменяв соответствующий `TEMP_*`.
+
 Конфиг берется из CLI или env:
 
 - `--api-base` или `OPENAI_API_BASE`;
@@ -179,7 +183,7 @@ HTML чистится через `clean_html()`:
 - списки, абзацы, `<strong>`, `<em>` сохраняются в Markdown-like виде;
 - остальной HTML удаляется.
 
-Температура: `TEMP_INSTRUCTION = 0.7`.
+Temperature по умолчанию не передается: `TEMP_INSTRUCTION = None`.
 
 Ответ принимается как raw Markdown. Если модель обернула его в ```markdown, wrapper удаляется.
 
@@ -198,7 +202,7 @@ Prompt просит JSON:
 }
 ```
 
-Температура: `TEMP_ENVIRONMENT = 0.3`.
+Temperature по умолчанию не передается: `TEMP_ENVIRONMENT = None`.
 
 Парсинг:
 
@@ -231,7 +235,7 @@ Prompt получает:
        Content: first 200 chars...
 ```
 
-Температура: `TEMP_SOLUTION = 0.3`.
+Temperature по умолчанию не передается: `TEMP_SOLUTION = None`.
 
 Ответ извлекается из ```bash или ```sh block. Если fenced block нет, берется весь response.
 
@@ -266,19 +270,28 @@ Prompt просит JSON:
 
 ```json
 {
-  "test_sh": "#!/bin/bash\n...",
+  "test_sh": "",
   "test_outputs_py": "import pytest\n..."
 }
 ```
 
-Температура: `TEMP_TESTS = 0.2`.
+`test_sh` из LLM response не используется. Генератор всегда записывает статический offline runner `STATIC_TEST_SH`, который:
+
+- не вызывает `curl`, `uv`, `uvx`, `pip`, `apt-get`, GitHub или PyPI;
+- выбирает Python 3.12+ interpreter, в котором доступен `pytest`, с приоритетом
+  `PYTHON_BIN`, `python3.13`, `python3.12`, `/usr/local/bin/python3`,
+  `python3`, `/usr/bin/python3`;
+- запускает `python -m pytest /tests/test_outputs.py -rA`;
+- пишет `1` или `0` в `/logs/verifier/reward.txt`.
+
+Temperature по умолчанию не передается: `TEMP_TESTS = None`.
 
 Логика attempts:
 
 1. максимум 3 генерации;
 2. JSON извлекается из fenced ```json или из всего response;
 3. `test_outputs_py` должен существовать;
-4. `ast.parse(test_outputs_py)` должен пройти;
+4. `ast.parse(test_outputs_py, feature_version=(3, 12))` должен пройти;
 5. `_review_tests()` выполняет static review.
 
 Static review сейчас проверяет:
@@ -286,7 +299,9 @@ Static review сейчас проверяет:
 - `test_outputs.py` не должен запускать `solve.sh` через `subprocess.run/call/check_call/check_output/Popen`, `os.system`, `os.popen`;
 - imports кроме `pytest` должны быть из Python stdlib. Нестандартные библиотеки вроде `pandas`, `numpy`, `cv2` отклоняются.
 
-Если review прошел, тесты принимаются. Если review отклонил, candidate сохраняется. Если ни один из 3 attempts не прошел, но были syntactically valid candidates, возвращается первый rejected candidate. Если candidates нет, стадия failed.
+Prompt для этой стадии явно синхронизирован с reviewer-ом: `tests.md` требует black-box postcondition checks, запрещает импортировать implementation modules (`solution`, `app`, `main`, `model`) и запрещает third-party imports (`yaml`, `pydantic`, `fastapi`, `IPython`, etc.). Reference solution передается только как context для понимания expected postconditions.
+
+Если review прошел, тесты принимаются, а `test_sh` принудительно заменяется на `STATIC_TEST_SH`. Если review отклонил, candidate сохраняется уже со статическим runner-ом. Если ни один из 3 attempts не прошел, но были syntactically valid candidates, возвращается первый rejected candidate. Если candidates нет, стадия failed.
 
 ### 6. `environment/Dockerfile`
 
@@ -294,20 +309,29 @@ Static review сейчас проверяет:
 
 Prompt получает generated `instruction` и tags.
 
-Температура: `TEMP_DOCKERFILE = 0.3`.
+Temperature по умолчанию не передается: `TEMP_DOCKERFILE = None`.
 
 Ответ извлекается из ```dockerfile или generic fenced block. Если ответ отсутствует или не извлечен, используется fallback:
 
 ```dockerfile
-FROM ubuntu:22.04
+FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     bash coreutils findutils grep sed gawk curl wget git \
     && rm -rf /var/lib/apt/lists/*
 
+RUN python -m pip install --no-cache-dir pytest
+
 COPY ./task_file /app/task_file
 ```
+
+После извлечения Dockerfile генератор дополнительно вызывает `_ensure_verifier_deps()`. Он гарантирует build-time наличие Python 3.12+ и `pytest` для verifier:
+
+- если Dockerfile уже основан на Python 3.12+ image, добавляет `RUN python -m pip install --no-cache-dir pytest` до `COPY ./task_file`, если pytest не установлен;
+- если Dockerfile основан на другом image, добавляет multi-stage `verifier_python` на `python:3.12-slim-bookworm` и копирует `/usr/local` в final image до `COPY ./task_file`.
+
+Это нужно, чтобы `/tests/test.sh` не скачивал зависимости во время проверки и всегда исполнял `test_outputs.py` новым Python.
 
 ## Запись Файлов
 
@@ -406,14 +430,14 @@ docker build -t tl-validate-<task> -f environment/Dockerfile environment/
 
 ```text
 validated/validation_report.json
-validate_tasks.log
+validated/validate_tasks.log
 ```
 
 ## Важные Ограничения Текущей Реализации
 
 - Task generation генерирует небольшие standalone terminal tasks, обычно без полноценного repository context.
 - Tests генерируются моделью, но проходят только static review до Docker validation.
-- `test.sh` пока генерируется LLM-ом вместе с `test_outputs.py`, хотя по смыслу это runner template.
+- `test.sh` не генерируется LLM-ом: он всегда статический offline runner.
 - Нестандартные Python imports в `test_outputs.py` static review отклоняет.
 - Валидация проверяет reference solution, а не agent solution.
 - `scripts/generate_tasks.sh` принимает JSONL, но `generator/task_generator.py` напрямую принимает только generator JSON с полем `questions`.

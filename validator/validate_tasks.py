@@ -24,15 +24,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import threading
 
+LOG_FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler('validate_tasks.log'),
-        logging.StreamHandler()
-    ]
+    format=LOG_FORMAT,
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+
+
+def add_output_file_logger(log_path: Path) -> None:
+    root_logger = logging.getLogger()
+    resolved_log_path = log_path.resolve()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            if Path(handler.baseFilename).resolve() == resolved_log_path:
+                return
+
+    file_handler = logging.FileHandler(resolved_log_path)
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root_logger.addHandler(file_handler)
 
 
 class AtomicCounter:
@@ -202,6 +214,7 @@ def main():
     input_dir = Path(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    add_output_file_logger(output_dir / "validate_tasks.log")
 
     task_dirs = sorted([
         d for d in input_dir.iterdir()

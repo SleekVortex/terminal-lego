@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,46 @@ def test_truncation_detection_for_json_and_fenced_blocks() -> None:
     assert tg._is_truncated("prefix ```json\n" + '{"x": 1}' * 20)
     assert not tg._is_truncated("short")
     assert not tg._is_truncated('```json\n{"x": 1}\n```')
+
+
+def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    payloads = []
+
+    class DummyTracker:
+        def record(self, *args, **kwargs):
+            pass
+
+    class DummyResponse:
+        status_code = 200
+        headers = {}
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+
+    def fake_post(*args, **kwargs):
+        payloads.append(kwargs["json"])
+        return DummyResponse()
+
+    monkeypatch.setattr(tg, "token_tracker", DummyTracker())
+    monkeypatch.setattr(tg, "_last_request_time", 0)
+    monkeypatch.setitem(tg._config, "api_base", "http://example.test/v1")
+    monkeypatch.setitem(tg._config, "api_key", "EMPTY")
+    monkeypatch.setitem(tg._config, "model", "test-model")
+    monkeypatch.setattr(tg.requests, "post", fake_post)
+
+    assert tg.call_llm_api("prompt") == "ok"
+    assert "max_tokens" not in payloads[-1]
+    assert "temperature" not in payloads[-1]
+
+    assert tg.call_llm_api("prompt", max_tokens=123, temperature=0.4) == "ok"
+    assert payloads[-1]["max_tokens"] == 123
+    assert payloads[-1]["temperature"] == 0.4
 
 
 def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
@@ -157,7 +198,10 @@ def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, t
     assert generator._generate_solution("instruction", env_data) == "#!/bin/bash\necho ok"
 
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "```dockerfile\nFROM ubuntu:22.04\n```")
-    assert generator._generate_dockerfile("instruction") == "FROM ubuntu:22.04"
+    dockerfile = generator._generate_dockerfile("instruction")
+    assert dockerfile.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
+    assert "FROM ubuntu:22.04" in dockerfile
+    assert "COPY --from=verifier_python /usr/local /usr/local" in dockerfile
 
     assert generator._assess_difficulty("instruction") == "easy"
 
@@ -214,15 +258,17 @@ def test_generate_environment_and_dockerfile_fallbacks(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "not json")
     assert generator._generate_environment("instruction") == {"files": {}, "directories": ["task_file"]}
-    assert generator._generate_dockerfile("instruction").startswith("FROM ubuntu:22.04")
+    dockerfile = generator._generate_dockerfile("instruction")
+    assert dockerfile.startswith("FROM python:3.12-slim-bookworm")
+    assert "python -m pip install --no-cache-dir pytest" in dockerfile
 
 
 def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     generator = tg.TaskGenerator(make_question(), tmp_path)
     responses = iter(
         [
-            json.dumps({"test_sh": "run", "test_outputs_py": "def broken("}),
-            json.dumps({"test_sh": "run", "test_outputs_py": "def test_ok():\n    assert True\n"}),
+            json.dumps({"test_sh": "curl https://astral.sh/uv/install.sh | sh", "test_outputs_py": "def broken("}),
+            json.dumps({"test_sh": "uvx pytest", "test_outputs_py": "def test_ok():\n    assert True\n"}),
         ]
     )
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: next(responses))
@@ -233,7 +279,64 @@ def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytes
         "#!/bin/bash\ntrue",
     )
 
-    assert test_data == {"test_sh": "run", "test_outputs_py": "def test_ok():\n    assert True\n"}
+    assert test_data == {"test_sh": tg.STATIC_TEST_SH, "test_outputs_py": "def test_ok():\n    assert True\n"}
+    assert "curl" not in test_data["test_sh"]
+    assert "uvx" not in test_data["test_sh"]
+
+
+def test_ensure_verifier_deps_inserts_before_task_files_copy() -> None:
+    dockerfile = """FROM ubuntu:22.04
+WORKDIR /app
+RUN apt-get update && apt-get install -y gcc gdb && rm -rf /var/lib/apt/lists/*
+COPY ./task_file /app/task_file
+"""
+
+    patched = tg._ensure_verifier_deps(dockerfile)
+
+    assert patched.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
+    assert "RUN python -m pip install --no-cache-dir pytest" in patched
+    assert "COPY --from=verifier_python /usr/local /usr/local" in patched
+    assert patched.index("COPY --from=verifier_python") < patched.index("COPY ./task_file")
+
+
+def test_ensure_verifier_deps_adds_pytest_to_python312_base() -> None:
+    dockerfile = """FROM python:3.12-slim-bookworm
+WORKDIR /app
+COPY ./task_file /app/task_file
+"""
+
+    patched = tg._ensure_verifier_deps(dockerfile)
+
+    assert patched.startswith("FROM python:3.12-slim-bookworm")
+    assert "AS verifier_python" not in patched
+    assert "RUN python -m pip install --no-cache-dir pytest" in patched
+    assert patched.index("pip install") < patched.index("COPY ./task_file")
+
+
+def test_static_test_runner_is_offline() -> None:
+    runner = tg.STATIC_TEST_SH
+
+    assert "curl" not in runner
+    assert "uvx" not in runner
+    assert "astral.sh" not in runner
+    assert "github.com" not in runner
+    assert "pip install" not in runner
+    assert "apt-get" not in runner
+    assert "python3 -m pytest" in runner or "-m pytest" in runner
+    assert "python3.13" in runner
+    assert "python3.12" in runner
+    assert "sys.version_info >= (3, 12)" in runner
+    assert "/usr/local/bin/python3" in runner
+    assert runner.index("python3.13") < runner.index("/usr/local/bin/python3")
+    assert runner.index("/usr/local/bin/python3") < runner.index("/usr/bin/python3")
+
+
+def test_parse_test_outputs_accepts_python_312_f_string_syntax() -> None:
+    code = 'def test_warning_message():\n    warning_lines = ["x"]\n    assert False, f"warnings:\\n{\'\\n\'.join(warning_lines)}"\n'
+
+    tree = tg._parse_test_outputs_py(code)
+
+    assert isinstance(tree, tg.ast.Module)
 
 
 def test_review_tests_is_static_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -261,6 +364,14 @@ def test_review_tests_is_static_without_llm(monkeypatch: pytest.MonkeyPatch, tmp
     assert import_review["pass"] is False
     assert "non-stdlib import in test_outputs.py: pandas" in import_review["issues"]
 
+    py312_syntax_review = generator._review_tests(
+        "i",
+        "env",
+        "s",
+        'def test_warning_message():\n    warning_lines = ["x"]\n    assert False, f"warnings:\\n{\'\\n\'.join(warning_lines)}"\n',
+    )
+    assert py312_syntax_review == {"pass": True, "issues": []}
+
 
 def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
     generator = tg.TaskGenerator(make_question(), tmp_path, index=7)
@@ -268,6 +379,7 @@ def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
 
     assert 'difficulty = "hard"' in toml_text
     assert 'category = "system-administration"' in toml_text
+    assert "source_question_id = 123" in toml_text
     assert 'source_url = "https://stackoverflow.com/questions/123"' in toml_text
 
     generator._write_files(
@@ -286,8 +398,70 @@ def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
     assert (task_dir / "instruction.md").read_text(encoding="utf-8") == "# Task"
     assert (task_dir / "environment" / "Dockerfile").read_text(encoding="utf-8") == "FROM ubuntu:22.04\n"
     assert (task_dir / "environment" / "task_file" / "input" / "data.txt").read_text(encoding="utf-8") == "data"
+    assert (task_dir / "tests" / "test.sh").read_text(encoding="utf-8") == tg.STATIC_TEST_SH
     assert (task_dir / "tests" / "test_outputs.py").exists()
     assert (task_dir / "solution" / "solve.sh").exists()
+    assert (task_dir / "tests" / "test.sh").stat().st_mode & stat.S_IXUSR
+    assert (task_dir / "solution" / "solve.sh").stat().st_mode & stat.S_IXUSR
+
+
+def write_complete_task(task_dir: Path, task_toml: str) -> None:
+    (task_dir / "environment").mkdir(parents=True)
+    (task_dir / "solution").mkdir()
+    (task_dir / "tests").mkdir()
+    (task_dir / "task.toml").write_text(task_toml, encoding="utf-8")
+    (task_dir / "instruction.md").write_text("# Task\n", encoding="utf-8")
+    (task_dir / "environment" / "Dockerfile").write_text("FROM ubuntu:22.04\n", encoding="utf-8")
+    (task_dir / "solution" / "solve.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (task_dir / "tests" / "test.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (task_dir / "tests" / "test_outputs.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+
+def test_collect_existing_question_ids_reads_new_and_old_task_toml(tmp_path: Path) -> None:
+    write_complete_task(
+        tmp_path / "task_00001",
+        'version = "1.0"\n[metadata]\nsource_question_id = 123\n',
+    )
+    write_complete_task(
+        tmp_path / "task_00007",
+        'version = "1.0"\n[metadata]\nsource_url = "https://stackoverflow.com/questions/456/foo"\n',
+    )
+    incomplete = tmp_path / "task_00008"
+    incomplete.mkdir()
+    (incomplete / "task.toml").write_text(
+        'version = "1.0"\n[metadata]\nsource_question_id = 789\n',
+        encoding="utf-8",
+    )
+
+    existing = tg._collect_existing_question_ids(tmp_path)
+
+    assert existing[123] == tmp_path / "task_00001"
+    assert existing[456] == tmp_path / "task_00007"
+    assert 789 not in existing
+
+
+def test_build_task_args_resume_skips_existing_ids_and_uses_next_free_index(tmp_path: Path) -> None:
+    write_complete_task(
+        tmp_path / "task_00007",
+        'version = "1.0"\n[metadata]\nsource_question_id = 123\n',
+    )
+    write_complete_task(
+        tmp_path / "task_00012",
+        'version = "1.0"\n[metadata]\nsource_url = "https://stackoverflow.com/questions/456"\n',
+    )
+    questions = [
+        make_question(question_id=123).__dict__,
+        make_question(question_id=999, link="https://stackoverflow.com/questions/999").__dict__,
+        make_question(question_id=456, link="https://stackoverflow.com/questions/456").__dict__,
+        make_question(question_id=1000, link="https://stackoverflow.com/questions/1000").__dict__,
+    ]
+
+    task_args, resume_info = tg._build_task_args(questions, tmp_path, resume=True)
+
+    assert resume_info["skipped_existing_questions"] == 2
+    assert resume_info["next_task_index"] == 13
+    assert [arg[0]["question_id"] for arg in task_args] == [999, 1000]
+    assert [arg[3] for arg in task_args] == [13, 14]
 
 
 def test_process_question_updates_counters(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
