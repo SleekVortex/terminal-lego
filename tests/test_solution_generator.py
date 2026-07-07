@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from solvers import config_builder
+from solvers import parsing
 from solvers import run_solutions as sg
 from solvers import settings as solver_settings
+from solvers import summary as solution_summary
 from solvers.agents.preinstalled_opencode import (
     OPENCODE_SYSTEM_PROMPT,
     PreinstalledOpenCode,
@@ -16,27 +19,27 @@ from solvers.agents.preinstalled_opencode import (
 
 
 def test_parse_scalar_and_key_value_items() -> None:
-    assert sg.parse_scalar("true") is True
-    assert sg.parse_scalar("false") is False
-    assert sg.parse_scalar("null") is None
-    assert sg.parse_scalar("42") == 42
-    assert sg.parse_scalar("3.5") == 3.5
-    assert sg.parse_scalar('{"a": 1}') == {"a": 1}
-    assert sg.parse_key_value(["a=1", "enabled=true", "name=glm"]) == {
+    assert parsing.parse_scalar("true") is True
+    assert parsing.parse_scalar("false") is False
+    assert parsing.parse_scalar("null") is None
+    assert parsing.parse_scalar("42") == 42
+    assert parsing.parse_scalar("3.5") == 3.5
+    assert parsing.parse_scalar('{"a": 1}') == {"a": 1}
+    assert parsing.parse_key_value(["a=1", "enabled=true", "name=glm"]) == {
         "a": 1,
         "enabled": True,
         "name": "glm",
     }
-    assert sg.parse_env(["A=1", "EMPTY=", "FLAG=true"]) == {
+    assert parsing.parse_env(["A=1", "EMPTY=", "FLAG=true"]) == {
         "A": "1",
         "EMPTY": "",
         "FLAG": "true",
     }
 
     with pytest.raises(ValueError, match="KEY=VALUE"):
-        sg.parse_key_value(["broken"])
+        parsing.parse_key_value(["broken"])
     with pytest.raises(ValueError, match="Empty key"):
-        sg.parse_key_value([" =1"])
+        parsing.parse_key_value([" =1"])
 
 
 def test_build_agent_kwargs_adds_terminus_defaults_and_trajectory_config() -> None:
@@ -50,7 +53,7 @@ def test_build_agent_kwargs_adds_terminus_defaults_and_trajectory_config() -> No
         trajectory_config_json='{"max_tokens": 12}',
     )
 
-    kwargs = sg.build_agent_kwargs(args)
+    kwargs = config_builder.build_agent_kwargs(args)
 
     assert kwargs["parser_name"] == "xml"
     assert kwargs["enable_summarize"] is True
@@ -98,7 +101,7 @@ def test_build_job_config_for_single_task_and_dataset(tmp_path: Path) -> None:
             str(tmp_path / "extra.md"),
         ]
     )
-    config = sg.build_job_config(args)
+    config = config_builder.build_job_config(args)
     dumped = config.model_dump()
 
     assert dumped["job_name"] == "job-one"
@@ -129,7 +132,7 @@ def test_build_job_config_for_single_task_and_dataset(tmp_path: Path) -> None:
             "3",
         ]
     )
-    dataset_config = sg.build_job_config(args).model_dump()
+    dataset_config = config_builder.build_job_config(args).model_dump()
     assert len(dataset_config["datasets"]) == 1
     assert dataset_config["datasets"][0]["task_names"] == ["task_a"]
     assert dataset_config["datasets"][0]["exclude_task_names"] == ["task_b"]
@@ -161,7 +164,7 @@ def test_build_job_config_uses_import_path_for_preinstalled_opencode(
         ]
     )
 
-    config = sg.build_job_config(args)
+    config = config_builder.build_job_config(args)
     agent = config.agents[0]
 
     assert agent.name is None
@@ -176,7 +179,7 @@ def test_build_job_config_uses_import_path_for_preinstalled_opencode(
 def test_build_job_config_rejects_missing_task_path(tmp_path: Path) -> None:
     args = sg.parse_args(["--tasks-dir", str(tmp_path / "missing")])
     with pytest.raises(SystemExit, match="Task path does not exist"):
-        sg.build_job_config(args)
+        config_builder.build_job_config(args)
 
 
 def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
@@ -249,11 +252,11 @@ def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
     )
     (bad / "result.json").write_text("{bad json", encoding="utf-8")
 
-    assert sg.reward_from_result({"verifier_result": {"rewards": {"reward": "0.5"}}}) == 0.5
-    assert sg.reward_from_result({"verifier_result": {"rewards": {"reward": "nan"}}}) is None
-    assert sg.exception_type_from_result({"exception_info": {"type": "AgentTimeoutError"}}) == "AgentTimeoutError"
+    assert solution_summary.reward_from_result({"verifier_result": {"rewards": {"reward": "0.5"}}}) == 0.5
+    assert solution_summary.reward_from_result({"verifier_result": {"rewards": {"reward": "nan"}}}) is None
+    assert solution_summary.exception_type_from_result({"exception_info": {"type": "AgentTimeoutError"}}) == "AgentTimeoutError"
 
-    results = list(sg.iter_trial_results(job_dir))
+    results = list(solution_summary.iter_trial_results(job_dir))
     assert [item["trial_dir"].name for item in results] == [
         "trial-a",
         "trial-b",
@@ -261,7 +264,7 @@ def test_reward_result_iteration_and_summary_files(tmp_path: Path) -> None:
         "trial-timeout",
     ]
 
-    summary = sg.summarize_job(job_dir, reward_threshold=1.0)
+    summary = solution_summary.summarize_job(job_dir, reward_threshold=1.0)
 
     assert summary["total_trials"] == 4
     assert summary["accepted_trials"] == 2
