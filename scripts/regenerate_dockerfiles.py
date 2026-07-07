@@ -20,7 +20,17 @@ REPO_DIR = Path(__file__).resolve().parents[1]
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
-from generator import task_generator as tg  # noqa: E402
+from generator import llm_client  # noqa: E402
+from generator.contracts import SOQuestion  # noqa: E402
+from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker  # noqa: E402
+from generator.orchestrator import DOCKERFILE_MAX_ATTEMPTS, TaskGenerator  # noqa: E402
+from generator.prompt_loader import DOCKERFILE_PROMPT_TEMPLATE, SYSTEM_PROMPT  # noqa: E402
+from generator.reviewers.dockerfile_review import (  # noqa: E402
+    ensure_verifier_deps,
+    extract_dockerfile_from_response,
+    review_dockerfile,
+)
+from generator.task_writer import format_env_file_list  # noqa: E402
 
 
 def parse_task_index(task_name: str) -> Optional[int]:
@@ -69,7 +79,7 @@ def build_env_data(environment_dir: Path, max_file_bytes: int) -> Dict[str, Any]
     return {"files": files, "directories": directories}
 
 
-def make_question(task_dir: Path, task_toml: Dict[str, Any]) -> tg.SOQuestion:
+def make_question(task_dir: Path, task_toml: Dict[str, Any]) -> SOQuestion:
     metadata = task_toml.get("metadata", {}) if isinstance(task_toml, dict) else {}
     index = parse_task_index(task_dir.name) or 0
     question_id = int(metadata.get("source_question_id") or index)
@@ -80,7 +90,7 @@ def make_question(task_dir: Path, task_toml: Dict[str, Any]) -> tg.SOQuestion:
     if isinstance(categories, str):
         categories = [categories]
 
-    return tg.SOQuestion(
+    return SOQuestion(
         question_id=question_id,
         title=task_dir.name,
         body="",
@@ -96,22 +106,22 @@ def make_question(task_dir: Path, task_toml: Dict[str, Any]) -> tg.SOQuestion:
 
 
 def generate_dockerfile_strict(
-    generator: tg.TaskGenerator,
+    generator: TaskGenerator,
     instruction: str,
     env_data: Dict[str, Any],
     solution: str,
     test_outputs_py: str,
 ) -> tuple[str, int, list[str]]:
-    prompt = tg.DOCKERFILE_PROMPT_TEMPLATE.format(
+    prompt = DOCKERFILE_PROMPT_TEMPLATE.format(
         instruction=instruction,
         tags=", ".join(generator.question.tags),
-        env_file_list=generator._format_env_file_list(env_data),
+        env_file_list=format_env_file_list(env_data),
         solution=solution,
         test_outputs_py=test_outputs_py,
     )
     feedback = ""
     last_issues = []
-    for attempt in range(tg.DOCKERFILE_MAX_ATTEMPTS):
+    for attempt in range(DOCKERFILE_MAX_ATTEMPTS):
         attempt_prompt = prompt
         if feedback:
             attempt_prompt += (
@@ -119,10 +129,10 @@ def generate_dockerfile_strict(
                 + feedback
                 + "\nRegenerate only the Dockerfile."
             )
-        response = tg.call_llm_api(
+        response = llm_client.call_llm_api(
             attempt_prompt,
-            tg.SYSTEM_PROMPT,
-            temperature=tg.TEMP_DOCKERFILE,
+            SYSTEM_PROMPT,
+            temperature=None,
             task_name=generator.task_name,
             stage="dockerfile",
         )
@@ -130,13 +140,13 @@ def generate_dockerfile_strict(
             last_issues = ["LLM returned no Dockerfile response"]
             feedback = "- " + last_issues[0]
             continue
-        extracted = tg._extract_dockerfile_from_response(response)
+        extracted = extract_dockerfile_from_response(response)
         if not extracted:
             last_issues = ["LLM Dockerfile response did not contain a fenced Dockerfile block"]
             feedback = "- " + last_issues[0]
             continue
-        dockerfile = tg._ensure_verifier_deps(extracted)
-        review = tg._review_dockerfile(dockerfile, env_data)
+        dockerfile = ensure_verifier_deps(extracted)
+        review = review_dockerfile(dockerfile, env_data)
         if review.get("pass"):
             return dockerfile, attempt + 1, []
         last_issues = list(review.get("issues", []))
@@ -183,10 +193,11 @@ def regenerate_one(
         env_data = build_env_data(task_dir / "environment", max_file_bytes=max_file_bytes)
         task_toml = load_task_toml(task_dir / "task.toml")
 
-        generator = tg.TaskGenerator(
+        generator = TaskGenerator(
             make_question(task_dir, task_toml),
             tasks_dir,
             index=parse_task_index(task_dir.name),
+            llm_call=llm_client.call_llm_api,
         )
         dockerfile, attempts, issues = generate_dockerfile_strict(generator, instruction, env_data, solution, test_outputs_py)
 
@@ -212,7 +223,7 @@ def regenerate_one(
             "status": "kept_old",
             "changed": False,
             "kept_old": True,
-            "attempts": tg.DOCKERFILE_MAX_ATTEMPTS,
+            "attempts": DOCKERFILE_MAX_ATTEMPTS,
             "issues": [str(exc)],
             "duration_sec": round(time.time() - started, 3),
             "error": str(exc),
@@ -233,19 +244,19 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--task-list", type=Path, default=None, help="JSONL list with a 'task' field; only these tasks are processed.")
     parser.add_argument("--max-file-bytes", type=int, default=4000)
-    parser.add_argument("--api-base", default=os.environ.get("OPENAI_API_BASE", tg.DEFAULT_API_BASE))
+    parser.add_argument("--api-base", default=os.environ.get("OPENAI_API_BASE", DEFAULT_API_BASE))
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
-    parser.add_argument("--model", default=os.environ.get("MODEL_NAME", tg.DEFAULT_MODEL))
+    parser.add_argument("--model", default=os.environ.get("MODEL_NAME", DEFAULT_MODEL))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     args.report_dir.mkdir(parents=True, exist_ok=True)
     report_path = args.report_dir / "regenerate_dockerfiles.jsonl"
     summary_path = args.report_dir / "regenerate_dockerfiles_summary.json"
-    tg.token_tracker = tg.TokenTracker(str(args.report_dir / "dockerfile_regen_token_usage.json"))
-    tg._config["api_base"] = args.api_base
-    tg._config["api_key"] = args.api_key
-    tg._config["model"] = args.model
+    llm_client.token_tracker = TokenTracker(str(args.report_dir / "dockerfile_regen_token_usage.json"))
+    llm_client._config["api_base"] = args.api_base
+    llm_client._config["api_key"] = args.api_key
+    llm_client._config["model"] = args.model
 
     task_filter = load_task_filter(args.task_list)
     task_dirs = list(iter_task_dirs(args.tasks_dir, args.start, args.limit, task_filter))
@@ -295,7 +306,7 @@ def main() -> None:
         "task_list": str(args.task_list) if args.task_list else None,
         "dry_run": args.dry_run,
         "elapsed_sec": round(time.time() - started, 3),
-        "token_usage": tg.token_tracker.get_summary(),
+        "token_usage": llm_client.token_tracker.get_summary(),
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))

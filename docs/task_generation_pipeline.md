@@ -6,9 +6,14 @@
 
 - `scripts/generate_tasks.sh` - convenience wrapper для подготовки seed и запуска генератора.
 - `stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
-- `generator/task_generator.py` - LLM-based генерация task directory.
+- `generator/task_generator.py` - CLI entrypoint генерации задач.
+- `generator/orchestrator.py` - координатор одной задачи без prompt text и Docker subprocess logic.
+- `generator/agents/task_generation.py` - LLM agents для `instruction`, `environment`, `solution`, `tests`, `Dockerfile`.
+- `generator/repair/agent.py` и `generator/repair/loop.py` - controlled repair loop для failed задач.
 - `prompts/task_generator/*.md` - prompt templates для стадий генерации.
+- `prompts/repair/task_repair.md` - prompt template для targeted repair.
 - `validator/validate_tasks.py` - отдельная Docker round-trip валидация generated candidates.
+- `validator/docker_runner.py` и `validator/validation_logs.py` - Docker execution и per-task logs.
 
 ## Общая Схема
 
@@ -133,7 +138,7 @@ PROMPT_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "prompts" / "task_ge
 
 `max_tokens` по умолчанию не отправляется в request payload. Это снимает client-side cap на completion length и позволяет endpoint/model server самому ограничивать ответ по доступному контексту. Явный лимит все еще можно передать через `call_llm_api(..., max_tokens=...)`, если он понадобится для отдельной стадии.
 
-`temperature` по умолчанию тоже не отправляется. Все `TEMP_*` constants сейчас равны `None`, поэтому endpoint использует свои sampler defaults. Явную температуру можно вернуть для отдельной стадии, передав `call_llm_api(..., temperature=...)` или поменяв соответствующий `TEMP_*`.
+`temperature` по умолчанию тоже не отправляется. В новой реализации стадии передают `temperature=None`, а `llm_client.call_llm_api()` не добавляет это поле в payload. Явную температуру можно вернуть для отдельной стадии, передав `call_llm_api(..., temperature=...)`.
 
 Конфиг берется из CLI или env:
 
@@ -183,7 +188,7 @@ HTML чистится через `clean_html()`:
 - списки, абзацы, `<strong>`, `<em>` сохраняются в Markdown-like виде;
 - остальной HTML удаляется.
 
-Temperature по умолчанию не передается: `TEMP_INSTRUCTION = None`.
+Temperature по умолчанию не передается.
 
 Ответ принимается как raw Markdown. Если модель обернула его в ```markdown, wrapper удаляется.
 
@@ -202,7 +207,7 @@ Prompt просит JSON:
 }
 ```
 
-Temperature по умолчанию не передается: `TEMP_ENVIRONMENT = None`.
+Temperature по умолчанию не передается.
 
 Парсинг:
 
@@ -227,7 +232,7 @@ Prompt получает:
 - tags;
 - список доступных environment files.
 
-Список environment files формируется `_format_env_file_list()`:
+Список environment files формируется `format_env_file_list()`:
 
 ```text
 [dir]  /app/task_file/input/
@@ -235,7 +240,7 @@ Prompt получает:
        Content: first 200 chars...
 ```
 
-Temperature по умолчанию не передается: `TEMP_SOLUTION = None`.
+Temperature по умолчанию не передается.
 
 Ответ извлекается из ```bash или ```sh block. Если fenced block нет, берется весь response.
 
@@ -284,7 +289,7 @@ Prompt просит JSON:
 - запускает `python -m pytest /tests/test_outputs.py -rA`;
 - пишет `1` или `0` в `/logs/verifier/reward.txt`.
 
-Temperature по умолчанию не передается: `TEMP_TESTS = None`.
+Temperature по умолчанию не передается.
 
 Логика attempts:
 
@@ -315,7 +320,7 @@ Prompt получает:
 - generated `solution/solve.sh`;
 - generated `tests/test_outputs.py`.
 
-Temperature по умолчанию не передается: `TEMP_DOCKERFILE = None`.
+Temperature по умолчанию не передается.
 
 Prompt выбирает Docker base image под runtime задачи, а не под verifier:
 

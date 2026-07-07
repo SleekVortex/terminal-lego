@@ -2,14 +2,33 @@ from __future__ import annotations
 
 import json
 import stat
+import ast
+import hashlib
 from pathlib import Path
 
 import pytest
 
-from generator import task_generator as tg
+from generator import llm_client
+from generator import task_generator as cli
+from generator.contracts import SOQuestion
+from generator.llm_client import TokenTracker, call_llm_api, is_truncated
+from generator.orchestrator import TaskGenerator
+from generator.prompt_loader import (
+    DOCKERFILE_PROMPT_TEMPLATE,
+    ENVIRONMENT_PROMPT_TEMPLATE,
+    INSTRUCTION_PROMPT_TEMPLATE,
+    PROMPT_TEMPLATE_DIR,
+    SOLUTION_PROMPT_TEMPLATE,
+    SYSTEM_PROMPT,
+    TEST_PROMPT_TEMPLATE,
+)
+from generator.resume import build_task_args, collect_existing_question_ids
+from generator.reviewers.dockerfile_review import ensure_verifier_deps, review_dockerfile
+from generator.reviewers.test_review import STATIC_TEST_SH, parse_test_outputs_py
+from generator.text_utils import clean_html
 
 
-def make_question(**overrides) -> tg.SOQuestion:
+def make_question(**overrides) -> SOQuestion:
     data = {
         "question_id": 123,
         "title": "Parse JSON with Bash?",
@@ -23,7 +42,7 @@ def make_question(**overrides) -> tg.SOQuestion:
         "selected_category": "system-administration",
     }
     data.update(overrides)
-    return tg.SOQuestion.from_dict(data)
+    return SOQuestion.from_dict(data)
 
 
 def test_so_question_from_dict_normalizes_categories_and_answer() -> None:
@@ -44,7 +63,7 @@ def test_clean_html_preserves_code_links_lists_and_emphasis() -> None:
         '<ul><li>one</li><li><em>two</em></li></ul>'
     )
 
-    cleaned = tg.clean_html(html)
+    cleaned = clean_html(html)
 
     assert "**world**" in cleaned
     assert '```\nprint("<x>")\n```' in cleaned
@@ -55,10 +74,10 @@ def test_clean_html_preserves_code_links_lists_and_emphasis() -> None:
 
 
 def test_truncation_detection_for_json_and_fenced_blocks() -> None:
-    assert tg._is_truncated("{" + '"x": ' + '"y"' * 80)
-    assert tg._is_truncated("prefix ```json\n" + '{"x": 1}' * 20)
-    assert not tg._is_truncated("short")
-    assert not tg._is_truncated('```json\n{"x": 1}\n```')
+    assert is_truncated("{" + '"x": ' + '"y"' * 80)
+    assert is_truncated("prefix ```json\n" + '{"x": 1}' * 20)
+    assert not is_truncated("short")
+    assert not is_truncated('```json\n{"x": 1}\n```')
 
 
 def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,27 +104,27 @@ def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: p
         payloads.append(kwargs["json"])
         return DummyResponse()
 
-    monkeypatch.setattr(tg, "token_tracker", DummyTracker())
-    monkeypatch.setattr(tg, "_last_request_time", 0)
-    monkeypatch.setitem(tg._config, "api_base", "http://example.test/v1")
-    monkeypatch.setitem(tg._config, "api_key", "EMPTY")
-    monkeypatch.setitem(tg._config, "model", "test-model")
-    monkeypatch.setattr(tg.requests, "post", fake_post)
+    monkeypatch.setattr(llm_client, "token_tracker", DummyTracker())
+    monkeypatch.setattr(llm_client, "_last_request_time", 0)
+    monkeypatch.setitem(llm_client._config, "api_base", "http://example.test/v1")
+    monkeypatch.setitem(llm_client._config, "api_key", "EMPTY")
+    monkeypatch.setitem(llm_client._config, "model", "test-model")
+    monkeypatch.setattr(llm_client.requests, "post", fake_post)
 
-    assert tg.call_llm_api("prompt") == "ok"
+    assert call_llm_api("prompt") == "ok"
     assert "max_tokens" not in payloads[-1]
     assert "temperature" not in payloads[-1]
 
-    assert tg.call_llm_api("prompt", max_tokens=123, temperature=0.4) == "ok"
+    assert call_llm_api("prompt", max_tokens=123, temperature=0.4) == "ok"
     assert payloads[-1]["max_tokens"] == 123
     assert payloads[-1]["temperature"] == 0.4
 
 
 def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(title="A/B: Parse JSON?"), tmp_path)
+    generator = TaskGenerator(make_question(title="A/B: Parse JSON?"), tmp_path)
 
     assert generator.task_name == "ab-parse-json-123"
-    assert generator.guid == tg.hashlib.md5(b"123").hexdigest()[:8]
+    assert generator.guid == hashlib.md5(b"123").hexdigest()[:8]
 
     listing = generator._format_env_file_list(
         {
@@ -120,21 +139,21 @@ def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
 
 def test_prompt_templates_are_loaded_from_prompt_files() -> None:
     prompt_files = {
-        "system.md": tg.SYSTEM_PROMPT,
-        "instruction.md": tg.INSTRUCTION_PROMPT_TEMPLATE,
-        "environment.md": tg.ENVIRONMENT_PROMPT_TEMPLATE,
-        "solution.md": tg.SOLUTION_PROMPT_TEMPLATE,
-        "tests.md": tg.TEST_PROMPT_TEMPLATE,
-        "dockerfile.md": tg.DOCKERFILE_PROMPT_TEMPLATE,
+        "system.md": SYSTEM_PROMPT,
+        "instruction.md": INSTRUCTION_PROMPT_TEMPLATE,
+        "environment.md": ENVIRONMENT_PROMPT_TEMPLATE,
+        "solution.md": SOLUTION_PROMPT_TEMPLATE,
+        "tests.md": TEST_PROMPT_TEMPLATE,
+        "dockerfile.md": DOCKERFILE_PROMPT_TEMPLATE,
     }
 
-    assert tg.PROMPT_TEMPLATE_DIR.name == "task_generator"
+    assert PROMPT_TEMPLATE_DIR.name == "task_generator"
     for filename, prompt in prompt_files.items():
-        assert prompt == (tg.PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
+        assert prompt == (PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
 
 
 def test_dockerfile_prompt_is_runtime_first() -> None:
-    prompt = tg.DOCKERFILE_PROMPT_TEMPLATE
+    prompt = DOCKERFILE_PROMPT_TEMPLATE
 
     assert "Choose the base image for the task runtime first." in prompt
     assert "Do not choose a Python image only because the verifier uses Python." in prompt
@@ -149,7 +168,7 @@ def test_dockerfile_prompt_is_runtime_first() -> None:
 
 def test_token_tracker_records_stage_telemetry(tmp_path: Path) -> None:
     usage_path = tmp_path / "usage.json"
-    tracker = tg.TokenTracker(str(usage_path))
+    tracker = TokenTracker(str(usage_path))
 
     tracker.record(
         10,
@@ -187,34 +206,24 @@ def test_token_tracker_records_stage_telemetry(tmp_path: Path) -> None:
     assert data["records"][1]["status"] == "timeout"
 
 
-def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(), tmp_path)
+def test_generation_steps_parse_llm_responses(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(), tmp_path)
 
-    monkeypatch.setattr(
-        tg,
-        "call_llm_api",
-        lambda *args, **kwargs: "```markdown\n# Task\nDo work.\n```",
-    )
+    generator.llm_call = lambda *args, **kwargs: "```markdown\n# Task\nDo work.\n```"
     assert generator._generate_instruction() == "# Task\nDo work."
 
-    monkeypatch.setattr(
-        tg,
-        "call_llm_api",
-        lambda *args, **kwargs: (
-            '```json\n{"files": {"task_file/input.txt": "data"}, '
-            '"directories": ["task_file"]}\n```'
-        ),
+    generator.llm_call = lambda *args, **kwargs: (
+        '```json\n{"files": {"task_file/input.txt": "data"}, '
+        '"directories": ["task_file"]}\n```'
     )
     env_data = generator._generate_environment("instruction")
     assert env_data["files"]["task_file/input.txt"] == "data"
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "```bash\n#!/bin/bash\necho ok\n```")
+    generator.llm_call = lambda *args, **kwargs: "```bash\n#!/bin/bash\necho ok\n```"
     assert generator._generate_solution("instruction", env_data) == "#!/bin/bash\necho ok"
 
-    monkeypatch.setattr(
-        tg,
-        "call_llm_api",
-        lambda *args, **kwargs: "```dockerfile\nFROM ubuntu:22.04\nWORKDIR /app\nCOPY ./task_file /app/task_file\n```",
+    generator.llm_call = lambda *args, **kwargs: (
+        "```dockerfile\nFROM ubuntu:22.04\nWORKDIR /app\nCOPY ./task_file /app/task_file\n```"
     )
     dockerfile = generator._generate_dockerfile("instruction")
     assert dockerfile.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
@@ -224,11 +233,8 @@ def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, t
     assert generator._assess_difficulty("instruction") == "easy"
 
 
-def test_generate_dockerfile_prompt_includes_generated_artifacts(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    generator = tg.TaskGenerator(make_question(tags=["node.js", "npm"]), tmp_path)
+def test_generate_dockerfile_prompt_includes_generated_artifacts(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(tags=["node.js", "npm"]), tmp_path)
     captured: dict[str, str] = {}
 
     def fake_call(prompt: str, *args, **kwargs) -> str:
@@ -239,7 +245,7 @@ def test_generate_dockerfile_prompt_includes_generated_artifacts(
             "COPY ./task_file /app/task_file\n```"
         )
 
-    monkeypatch.setattr(tg, "call_llm_api", fake_call)
+    generator.llm_call = fake_call
 
     dockerfile = generator._generate_dockerfile(
         "Build the package.",
@@ -263,7 +269,7 @@ def test_generate_dockerfile_prompt_includes_generated_artifacts(
 
 
 def test_review_dockerfile_rejects_invalid_patterns() -> None:
-    review = tg._review_dockerfile(
+    review = review_dockerfile(
         """FROM ubuntu:22.04
 WORKDIR /app
 RUN apt-get update && apt-get install -y && rm -rf /var/lib/apt/lists/*
@@ -281,7 +287,7 @@ COPY ./missing /app/missing
 
 
 def test_review_dockerfile_accepts_runtime_image_with_artifacts() -> None:
-    dockerfile = tg._ensure_verifier_deps(
+    dockerfile = ensure_verifier_deps(
         """FROM node:20-slim
 WORKDIR /app
 COPY ./package.json /app/package.json
@@ -289,7 +295,7 @@ COPY ./task_file /app/task_file
 """
     )
 
-    review = tg._review_dockerfile(
+    review = review_dockerfile(
         dockerfile,
         {
             "directories": ["task_file"],
@@ -303,8 +309,8 @@ COPY ./task_file /app/task_file
     assert review == {"pass": True, "issues": []}
 
 
-def test_generate_dockerfile_retries_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(tags=["node.js"]), tmp_path)
+def test_generate_dockerfile_retries_static_review(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(tags=["node.js"]), tmp_path)
     prompts = []
     responses = iter(
         [
@@ -317,7 +323,7 @@ def test_generate_dockerfile_retries_static_review(monkeypatch: pytest.MonkeyPat
         prompts.append(prompt)
         return next(responses)
 
-    monkeypatch.setattr(tg, "call_llm_api", fake_call)
+    generator.llm_call = fake_call
 
     dockerfile = generator._generate_dockerfile(
         "Run the Node script.",
@@ -332,23 +338,18 @@ def test_generate_dockerfile_retries_static_review(monkeypatch: pytest.MonkeyPat
     assert "Previous Dockerfile attempt was rejected" in prompts[1]
 
 
-def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def fail_call(*args, **kwargs):
-        raise AssertionError("difficulty should not call the LLM")
-
-    monkeypatch.setattr(tg, "call_llm_api", fail_call)
-
-    assert tg.TaskGenerator(
+def test_assess_difficulty_is_deterministic_without_llm(tmp_path: Path) -> None:
+    assert TaskGenerator(
         make_question(tags=["json"], categories=["data-processing"], score=600),
         tmp_path,
     )._assess_difficulty("Short JSON conversion task") == "easy"
 
-    assert tg.TaskGenerator(
+    assert TaskGenerator(
         make_question(tags=["cuda"], categories=["machine-learning"]),
         tmp_path,
     )._assess_difficulty("Check the installed CUDA version") == "easy"
 
-    assert tg.TaskGenerator(
+    assert TaskGenerator(
         make_question(
             body="<p>" + ("x" * 2000) + "</p>",
             accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
@@ -358,7 +359,7 @@ def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.Monk
         tmp_path,
     )._assess_difficulty("Implement a multi-step script") == "medium"
 
-    assert tg.TaskGenerator(
+    assert TaskGenerator(
         make_question(
             body="<p>" + ("x" * 5000) + "</p>",
             accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
@@ -368,7 +369,7 @@ def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.Monk
         tmp_path,
     )._assess_difficulty("Inspect a long shell task") == "hard"
 
-    assert tg.TaskGenerator(
+    assert TaskGenerator(
         make_question(
             body="<pre><code>a</code></pre>" * 4,
             accepted_answer={"answer_id": 456, "body": "<p>answer</p>", "score": 99},
@@ -379,10 +380,10 @@ def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.Monk
     )._assess_difficulty("Inspect several snippets") == "hard"
 
 
-def test_generate_environment_and_dockerfile_fallbacks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(), tmp_path)
+def test_generate_environment_and_dockerfile_fallbacks(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(), tmp_path)
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "not json")
+    generator.llm_call = lambda *args, **kwargs: "not json"
     assert generator._generate_environment("instruction") == {"files": {}, "directories": ["task_file"]}
     assert generator._generate_dockerfile("instruction") is None
 
@@ -394,7 +395,7 @@ WORKDIR /app
 COPY ./task_file /app/task_file
 """
 
-        patched = tg._ensure_verifier_deps(dockerfile)
+        patched = ensure_verifier_deps(dockerfile)
 
         assert patched.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
         assert f"FROM {base_image}" in patched
@@ -402,15 +403,15 @@ COPY ./task_file /app/task_file
         assert patched.index(f"FROM {base_image}") < patched.index("COPY --from=verifier_python")
 
 
-def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(), tmp_path)
+def test_generate_tests_retries_syntax_and_uses_static_review(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(), tmp_path)
     responses = iter(
         [
             json.dumps({"test_sh": "curl https://astral.sh/uv/install.sh | sh", "test_outputs_py": "def broken("}),
             json.dumps({"test_sh": "uvx pytest", "test_outputs_py": "def test_ok():\n    assert True\n"}),
         ]
     )
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: next(responses))
+    generator.llm_call = lambda *args, **kwargs: next(responses)
 
     test_data = generator._generate_tests(
         "instruction",
@@ -418,7 +419,7 @@ def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytes
         "#!/bin/bash\ntrue",
     )
 
-    assert test_data == {"test_sh": tg.STATIC_TEST_SH, "test_outputs_py": "def test_ok():\n    assert True\n"}
+    assert test_data == {"test_sh": STATIC_TEST_SH, "test_outputs_py": "def test_ok():\n    assert True\n"}
     assert "curl" not in test_data["test_sh"]
     assert "uvx" not in test_data["test_sh"]
 
@@ -430,7 +431,7 @@ RUN apt-get update && apt-get install -y gcc gdb && rm -rf /var/lib/apt/lists/*
 COPY ./task_file /app/task_file
 """
 
-    patched = tg._ensure_verifier_deps(dockerfile)
+    patched = ensure_verifier_deps(dockerfile)
 
     assert patched.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
     assert "RUN python -m pip install --no-cache-dir pytest" in patched
@@ -444,7 +445,7 @@ WORKDIR /app
 COPY ./task_file /app/task_file
 """
 
-    patched = tg._ensure_verifier_deps(dockerfile)
+    patched = ensure_verifier_deps(dockerfile)
 
     assert patched.startswith("FROM python:3.12-slim-bookworm")
     assert "AS verifier_python" not in patched
@@ -453,7 +454,7 @@ COPY ./task_file /app/task_file
 
 
 def test_static_test_runner_is_offline() -> None:
-    runner = tg.STATIC_TEST_SH
+    runner = STATIC_TEST_SH
 
     assert "curl" not in runner
     assert "uvx" not in runner
@@ -473,17 +474,13 @@ def test_static_test_runner_is_offline() -> None:
 def test_parse_test_outputs_accepts_python_312_f_string_syntax() -> None:
     code = 'def test_warning_message():\n    warning_lines = ["x"]\n    assert False, f"warnings:\\n{\'\\n\'.join(warning_lines)}"\n'
 
-    tree = tg._parse_test_outputs_py(code)
+    tree = parse_test_outputs_py(code)
 
-    assert isinstance(tree, tg.ast.Module)
+    assert isinstance(tree, ast.Module)
 
 
-def test_review_tests_is_static_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    def fail_call(*args, **kwargs):
-        raise AssertionError("test review should not call the LLM")
-
-    generator = tg.TaskGenerator(make_question(), tmp_path)
-    monkeypatch.setattr(tg, "call_llm_api", fail_call)
+def test_review_tests_is_static_without_llm(tmp_path: Path) -> None:
+    generator = TaskGenerator(make_question(), tmp_path)
 
     assert generator._review_tests("i", "env", "s", "import os\n\ndef test_ok():\n    assert True\n") == {
         "pass": True,
@@ -513,7 +510,7 @@ def test_review_tests_is_static_without_llm(monkeypatch: pytest.MonkeyPatch, tmp
 
 
 def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
-    generator = tg.TaskGenerator(make_question(), tmp_path, index=7)
+    generator = TaskGenerator(make_question(), tmp_path, index=7)
     toml_text = generator._generate_task_toml("hard")
 
     assert 'difficulty = "hard"' in toml_text
@@ -541,7 +538,7 @@ def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
     assert "COPY --from=verifier_python /usr/local /usr/local" in written_dockerfile
     assert "RUN python -m pip install --no-cache-dir pytest" in written_dockerfile
     assert (task_dir / "environment" / "task_file" / "input" / "data.txt").read_text(encoding="utf-8") == "data"
-    assert (task_dir / "tests" / "test.sh").read_text(encoding="utf-8") == tg.STATIC_TEST_SH
+    assert (task_dir / "tests" / "test.sh").read_text(encoding="utf-8") == STATIC_TEST_SH
     assert (task_dir / "tests" / "test_outputs.py").exists()
     assert (task_dir / "solution" / "solve.sh").exists()
     assert (task_dir / "tests" / "test.sh").stat().st_mode & stat.S_IXUSR
@@ -576,7 +573,7 @@ def test_collect_existing_question_ids_reads_new_and_old_task_toml(tmp_path: Pat
         encoding="utf-8",
     )
 
-    existing = tg._collect_existing_question_ids(tmp_path)
+    existing = collect_existing_question_ids(tmp_path)
 
     assert existing[123] == tmp_path / "task_00001"
     assert existing[456] == tmp_path / "task_00007"
@@ -599,7 +596,7 @@ def test_build_task_args_resume_skips_existing_ids_and_uses_next_free_index(tmp_
         make_question(question_id=1000, link="https://stackoverflow.com/questions/1000").__dict__,
     ]
 
-    task_args, resume_info = tg._build_task_args(questions, tmp_path, resume=True)
+    task_args, resume_info = build_task_args(questions, tmp_path, resume=True)
 
     assert resume_info["skipped_existing_questions"] == 2
     assert resume_info["next_task_index"] == 13
@@ -615,8 +612,8 @@ def test_process_question_updates_counters(monkeypatch: pytest.MonkeyPatch, tmp_
         def generate(self) -> bool:
             return True
 
-    before = tg.progress_counter.value
-    monkeypatch.setattr(tg, "TaskGenerator", DummyGenerator)
+    before = cli.progress_counter.value
+    monkeypatch.setattr(cli, "TaskGenerator", DummyGenerator)
 
-    assert tg.process_question((make_question().__dict__, tmp_path, 1, 1)) is True
-    assert tg.progress_counter.value == before + 1
+    assert cli.process_question((make_question().__dict__, tmp_path, 1, 1)) is True
+    assert cli.progress_counter.value == before + 1

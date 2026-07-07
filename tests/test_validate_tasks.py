@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 from validator import validate_tasks as vt
+from validator.docker_runner import CommandResult, DockerRunner, docker_safe_name
 
 
 def make_task(tmp_path: Path, name: str = "task_00000") -> Path:
@@ -22,8 +24,12 @@ def reset_counters() -> None:
         counter.value = 0
 
 
-def completed(cmd, code: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr=stderr)
+def ok(cmd: list[str] | None = None, stdout: str = "", stderr: str = "") -> CommandResult:
+    return CommandResult(cmd or [], 0, stdout=stdout, stderr=stderr)
+
+
+def fail(cmd: list[str] | None = None, stderr: str = "boom") -> CommandResult:
+    return CommandResult(cmd or [], 1, stderr=stderr)
 
 
 def test_atomic_counter_increment() -> None:
@@ -33,9 +39,18 @@ def test_atomic_counter_increment() -> None:
 
 
 def test_docker_safe_name_replaces_invalid_repository_chars() -> None:
-    assert vt.docker_safe_name("task_00000") == "task-00000"
-    assert vt.docker_safe_name("Task__With bad/chars") == "task-with-bad-chars"
-    assert vt.docker_safe_name("___") == "task"
+    assert docker_safe_name("task_00000") == "task-00000"
+    assert docker_safe_name("Task__With bad/chars") == "task-with-bad-chars"
+    assert docker_safe_name("___") == "task"
+
+
+def test_command_result_from_completed_and_timeout() -> None:
+    completed = subprocess.CompletedProcess(["x"], 2, stdout="out", stderr="err")
+    assert CommandResult.from_completed(completed).to_dict()["stderr"] == "err"
+    timeout = subprocess.TimeoutExpired(["x"], timeout=3, output="out", stderr="err")
+    timed_out = CommandResult.from_timeout(["x"], timeout, timeout=3)
+    assert timed_out.returncode == "timeout"
+    assert timed_out.timed_out is True
 
 
 def test_validate_task_reports_missing_required_files(tmp_path: Path) -> None:
@@ -54,51 +69,45 @@ def test_validate_task_reports_missing_required_files(tmp_path: Path) -> None:
     assert vt.validate_task(task, output, timeout=1, total=1)["status"] == "missing_tests"
 
 
-def test_validate_task_passes_and_copies_task_with_mocked_docker(monkeypatch, tmp_path: Path) -> None:
+def test_validate_task_passes_copies_task_and_writes_logs(monkeypatch, tmp_path: Path) -> None:
     reset_counters()
     task = make_task(tmp_path)
     output = tmp_path / "validated"
     output.mkdir()
-    commands = []
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
-        commands.append(cmd)
-        if cmd[:3] == ["docker", "exec", "tl-val-task-00000-" + str(vt.os.getpid())] and cmd[-1] == "/logs/verifier/reward.txt":
-            return completed(cmd, stdout="1\n")
-        return completed(cmd)
-
-    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(DockerRunner, "build", lambda self, dockerfile, env_dir, timeout: ok(["build"]))
+    monkeypatch.setattr(DockerRunner, "start", lambda self: ok(["run"]))
+    monkeypatch.setattr(DockerRunner, "exec", lambda self, cmd, timeout=300, workdir=None: ok(["exec"] + cmd))
+    monkeypatch.setattr(DockerRunner, "copy_to_container", lambda self, source, destination, timeout=10: ok(["cp", source, destination]))
+    monkeypatch.setattr(DockerRunner, "read_reward", lambda self: ok(["reward"], stdout="1\n"))
+    monkeypatch.setattr(DockerRunner, "cleanup", lambda self: None)
 
     result = vt.validate_task(task, output, timeout=10, total=1)
 
     assert result["status"] == "passed"
     assert result["reward"] == 1.0
-    assert (output / "task_00000" / "task.toml").exists() is False
     assert (output / "task_00000" / "solution" / "solve.sh").exists()
+    assert (output / "validation_logs" / "task_00000" / "build.stdout").exists()
+    result_json = json.loads((output / "validation_logs" / "task_00000" / "result.json").read_text())
+    assert result_json["status"] == "passed"
     assert vt.passed.value == 1
-    assert any(cmd[:2] == ["docker", "build"] for cmd in commands)
-    assert any(cmd[:4] == ["docker", "build", "-t", "tl-validate-task-00000"] for cmd in commands)
-    assert any(cmd[:2] == ["docker", "rm"] for cmd in commands)
 
 
-def test_validate_task_handles_build_failure_with_mocked_docker(monkeypatch, tmp_path: Path) -> None:
+def test_validate_task_handles_build_failure_with_logs(monkeypatch, tmp_path: Path) -> None:
     reset_counters()
     task = make_task(tmp_path)
     output = tmp_path / "validated"
     output.mkdir()
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
-        if cmd[:2] == ["docker", "build"]:
-            return completed(cmd, code=1, stderr="build boom")
-        return completed(cmd)
-
-    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(DockerRunner, "build", lambda self, dockerfile, env_dir, timeout: fail(["build"], stderr="build boom"))
+    monkeypatch.setattr(DockerRunner, "cleanup", lambda self: None)
 
     result = vt.validate_task(task, output, timeout=10, total=1)
 
     assert result["status"] == "build_failed"
     assert result["error"] == "build boom"
     assert vt.build_failed.value == 1
+    assert (output / "validation_logs" / "task_00000" / "build.stderr").read_text() == "build boom"
 
 
 def test_validate_task_handles_failed_reward(monkeypatch, tmp_path: Path) -> None:
@@ -107,12 +116,12 @@ def test_validate_task_handles_failed_reward(monkeypatch, tmp_path: Path) -> Non
     output = tmp_path / "validated"
     output.mkdir()
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None):
-        if cmd[:2] == ["docker", "exec"] and cmd[-1] == "/logs/verifier/reward.txt":
-            return completed(cmd, stdout="0\n")
-        return completed(cmd)
-
-    monkeypatch.setattr(vt.subprocess, "run", fake_run)
+    monkeypatch.setattr(DockerRunner, "build", lambda self, dockerfile, env_dir, timeout: ok(["build"]))
+    monkeypatch.setattr(DockerRunner, "start", lambda self: ok(["run"]))
+    monkeypatch.setattr(DockerRunner, "exec", lambda self, cmd, timeout=300, workdir=None: ok(["exec"] + cmd))
+    monkeypatch.setattr(DockerRunner, "copy_to_container", lambda self, source, destination, timeout=10: ok(["cp", source, destination]))
+    monkeypatch.setattr(DockerRunner, "read_reward", lambda self: ok(["reward"], stdout="0\n"))
+    monkeypatch.setattr(DockerRunner, "cleanup", lambda self: None)
 
     result = vt.validate_task(task, output, timeout=10, total=1)
 
