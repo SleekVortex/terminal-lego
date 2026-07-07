@@ -8,11 +8,11 @@ import json
 import os
 from pathlib import Path
 
-
 from generator import llm_client
 from generator.failure.classifier import classify_from_validation_report
 from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker
 from generator.repair.loop import load_diagnoses, run_repair_loop
+from validator.validate_tasks import TaskValidator
 
 
 def main() -> None:
@@ -43,6 +43,9 @@ def main() -> None:
     else:
         diagnoses = classify_from_validation_report(args.validation_output)
 
+    def validate_task(task_dir: Path, validation_output: Path, timeout: int) -> dict:
+        return TaskValidator(validation_output, timeout).validate(task_dir, total=1)
+
     summary = run_repair_loop(
         tasks_dir=args.tasks_dir,
         diagnoses=diagnoses,
@@ -52,6 +55,7 @@ def main() -> None:
         validate=not args.no_validate,
         timeout=args.timeout,
         llm_call=llm_client.call_llm_api,
+        validate_task=None if args.no_validate else validate_task,
     )
     summary["model"] = args.model
     summary["api_base"] = args.api_base

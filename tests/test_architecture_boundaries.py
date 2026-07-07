@@ -18,8 +18,17 @@ def test_task_generation_layer_does_not_depend_on_solver_runtime() -> None:
     for path in _python_files(REPO_ROOT / "generator"):
         text = path.read_text(encoding="utf-8")
         assert "harbor." not in text, path
+        assert "from solvers" not in text, path
+        assert "import solvers" not in text, path
         assert "solvers." not in text, path
         assert "preinstalled_opencode" not in text, path
+
+
+def test_task_generation_layer_does_not_depend_on_validator_runtime() -> None:
+    for path in _python_files(REPO_ROOT / "generator"):
+        text = path.read_text(encoding="utf-8")
+        assert "from validator" not in text, path
+        assert "import validator" not in text, path
 
 
 def test_solver_layer_does_not_depend_on_task_generation_agents() -> None:
@@ -40,6 +49,8 @@ def test_sources_layer_does_not_depend_on_generation_or_solver_layers() -> None:
         text = path.read_text(encoding="utf-8")
         assert "from generator" not in text, path
         assert "import generator" not in text, path
+        assert "from validator" not in text, path
+        assert "import validator" not in text, path
         assert "from solvers" not in text, path
         assert "import solvers" not in text, path
 

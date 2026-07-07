@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,7 +12,9 @@ from generator.contracts import FailureDiagnosis, RepairAttempt
 from generator.failure.classifier import classify_failure
 from generator.llm_client import call_llm_api
 from generator.repair.agent import RepairAgent
-from validator.validate_tasks import TaskValidator
+
+
+ValidateTask = Callable[[Path, Path, int], dict[str, Any]]
 
 
 def load_diagnoses(path: Path) -> list[FailureDiagnosis]:
@@ -47,6 +50,7 @@ class RepairLoop:
         validate: bool = True,
         timeout: int = 300,
         llm_call: LLMCall = call_llm_api,
+        validate_task: ValidateTask | None = None,
     ):
         self.tasks_dir = tasks_dir
         self.output_dir = output_dir
@@ -54,6 +58,7 @@ class RepairLoop:
         self.validate = validate
         self.timeout = timeout
         self.llm_call = llm_call
+        self.validate_task = validate_task
         self.attempts_dir = output_dir / "attempts"
         self.validated_dir = output_dir / "repaired_validated"
 
@@ -82,8 +87,10 @@ class RepairLoop:
             status = "patched" if changed_files else "not_repaired"
             validation_result: dict[str, Any] = {}
             if changed_files and self.validate:
+                if self.validate_task is None:
+                    raise RuntimeError("validate=True requires a validate_task callback")
                 validation_output = attempt_root / "validation"
-                validation_result = TaskValidator(validation_output, self.timeout).validate(repaired_task_dir, total=1)
+                validation_result = self.validate_task(repaired_task_dir, validation_output, self.timeout)
                 if validation_result.get("status") == "passed" and validation_result.get("reward") == 1.0:
                     status = "accepted"
                     accepted_dst = self.validated_dir / diagnosis.task_name
@@ -130,6 +137,7 @@ def run_repair_loop(
     validate: bool = True,
     timeout: int = 300,
     llm_call: LLMCall = call_llm_api,
+    validate_task: ValidateTask | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path = output_dir / "repair_report.jsonl"
@@ -137,7 +145,15 @@ def run_repair_loop(
         report_path.unlink()
 
     diagnoses = list(diagnoses)
-    loop = RepairLoop(tasks_dir, output_dir, max_attempts=max_attempts, validate=validate, timeout=timeout, llm_call=llm_call)
+    loop = RepairLoop(
+        tasks_dir,
+        output_dir,
+        max_attempts=max_attempts,
+        validate=validate,
+        timeout=timeout,
+        llm_call=llm_call,
+        validate_task=validate_task,
+    )
     attempts: list[RepairAttempt] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(loop.run_one, diagnosis): diagnosis for diagnosis in diagnoses}
