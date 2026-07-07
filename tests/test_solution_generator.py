@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from generator import solution_generator as sg
-from generator.agents.preinstalled_opencode import (
+from rollouts import solution_generator as sg
+from rollouts.agents.preinstalled_opencode import (
     OPENCODE_SYSTEM_PROMPT,
     PreinstalledOpenCode,
 )

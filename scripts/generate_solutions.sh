@@ -192,4 +192,4 @@ if [[ -n "${MATERIALIZE_INSTRUCTION:-}" ]]; then
   args+=(--extra-instruction-path "${MATERIALIZE_INSTRUCTION}")
 fi
 
-"${PYTHON_BIN}" "${REPO_DIR}/generator/solution_generator.py" "${args[@]}" "$@"
+"${PYTHON_BIN}" "${REPO_DIR}/rollouts/solution_generator.py" "${args[@]}" "$@"

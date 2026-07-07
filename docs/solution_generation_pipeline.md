@@ -5,7 +5,7 @@
 ## Основные Файлы
 
 - `scripts/generate_solutions.sh` - convenience wrapper для запуска solution generation.
-- `generator/solution_generator.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
+- `rollouts/solution_generator.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
 - `prompts/solution_generator/materialize_solution.md` - extra instruction для агента: материализовать итоговое решение в `/logs/artifacts/solve.sh`.
 - `configs/harbor/docker-compose-bridge-network.yaml` - опциональный Harbor compose override для `network_mode: bridge`.
 - `configs/opencode/` - preinstalled OpenCode runtime config для запуска OpenCode без скачивания nvm/npm внутри каждого trial.
@@ -15,7 +15,7 @@
 ```text
 validated Terminal-Lego tasks
   -> scripts/generate_solutions.sh
-  -> generator/solution_generator.py
+  -> rollouts/solution_generator.py
   -> Harbor Job
   -> agent runs task in Docker environment
   -> verifier runs tests
@@ -79,7 +79,7 @@ scripts/generate_solutions.sh TASKS_DIR [JOBS_DIR] [extra solution_generator arg
 Wrapper собирает аргументы и вызывает:
 
 ```bash
-python generator/solution_generator.py ...
+python rollouts/solution_generator.py ...
 ```
 
 Все extra CLI args после `TASKS_DIR [JOBS_DIR]` пробрасываются в `solution_generator.py`.
@@ -187,7 +187,7 @@ Trajectory для `preinstalled-opencode` дополняется первым st
 
 ## Harbor Integration
 
-`generator/solution_generator.py` импортирует Harbor runtime:
+`rollouts/solution_generator.py` импортирует Harbor runtime:
 
 ```python
 from harbor.job import Job
@@ -290,7 +290,7 @@ Wrapper всегда добавляет:
 Для `preinstalled-opencode` вместо `AgentConfig.name` используется Harbor `AgentConfig.import_path`:
 
 ```text
-generator.agents.preinstalled_opencode:PreinstalledOpenCode
+rollouts.agents.preinstalled_opencode:PreinstalledOpenCode
 ```
 
 Это позволяет не patch-ить Harbor package и при этом переиспользовать его OpenCode run/trajectory implementation.
@@ -362,7 +362,7 @@ MAX_RETRIES=0
 `--dry-run-config PATH` не запускает Harbor job. Вместо этого пишет serialized Harbor config:
 
 ```bash
-python generator/solution_generator.py \
+python rollouts/solution_generator.py \
   --tasks-dir ./validated \
   --dry-run-config ./job_config.json
 ```

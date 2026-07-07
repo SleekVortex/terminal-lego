@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 PREINSTALLED_OPENCODE_AGENT = "preinstalled-opencode"
 PREINSTALLED_OPENCODE_IMPORT_PATH = (
-    "generator.agents.preinstalled_opencode:PreinstalledOpenCode"
+    "rollouts.agents.preinstalled_opencode:PreinstalledOpenCode"
 )
 
 

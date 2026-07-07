@@ -191,7 +191,6 @@ generator/
     __init__.py
     base.py
     task_generation.py
-    preinstalled_opencode.py
   reviewers/
     __init__.py
     solution_review.py
@@ -204,6 +203,12 @@ generator/
     __init__.py
     loop.py
     agent.py
+
+rollouts/
+  solution_generator.py
+  agents/
+    __init__.py
+    preinstalled_opencode.py
 
 validator/
   validate_tasks.py
