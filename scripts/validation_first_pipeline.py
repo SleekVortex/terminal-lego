@@ -74,6 +74,16 @@ def copy_task(src: Path, dst: Path) -> bool:
     return True
 
 
+def parse_extra_validated_dir(value: str) -> tuple[str, Path]:
+    if "=" not in value:
+        raise ValueError(f"Expected SOURCE=DIR, got: {value!r}")
+    source, raw_path = value.split("=", 1)
+    source = source.strip()
+    if not source:
+        raise ValueError(f"Empty source name in SOURCE=DIR item: {value!r}")
+    return source, Path(raw_path)
+
+
 def merge_accepted(args: argparse.Namespace) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -81,10 +91,15 @@ def merge_accepted(args: argparse.Namespace) -> None:
     duplicates = 0
     seen = set()
 
-    for source_name, source_dir in (
+    sources = [
         ("baseline", args.baseline_validated_dir),
         ("regenerated", args.regenerated_validated_dir),
-    ):
+        ("repair", getattr(args, "repair_validated_dir", None)),
+    ]
+    for item in getattr(args, "extra_validated_dir", None) or []:
+        sources.append(parse_extra_validated_dir(item))
+
+    for source_name, source_dir in sources:
         if source_dir is None or not source_dir.exists():
             continue
         for task_dir in sorted(path for path in source_dir.iterdir() if path.is_dir() and path.name.startswith("task_")):
@@ -104,6 +119,8 @@ def merge_accepted(args: argparse.Namespace) -> None:
     report = {
         "baseline_validated_dir": str(args.baseline_validated_dir),
         "regenerated_validated_dir": str(args.regenerated_validated_dir) if args.regenerated_validated_dir else None,
+        "repair_validated_dir": str(getattr(args, "repair_validated_dir", None)) if getattr(args, "repair_validated_dir", None) else None,
+        "extra_validated_dir": getattr(args, "extra_validated_dir", None) or [],
         "output_dir": str(args.output_dir),
         "final_accepted": copied,
         "duplicates": duplicates,
@@ -132,6 +149,8 @@ def main() -> None:
     merge = subparsers.add_parser("merge-accepted", help="Merge baseline and regenerated validated tasks.")
     merge.add_argument("--baseline-validated-dir", required=True, type=Path)
     merge.add_argument("--regenerated-validated-dir", type=Path, default=None)
+    merge.add_argument("--repair-validated-dir", type=Path, default=None)
+    merge.add_argument("--extra-validated-dir", action="append", default=[], help="Additional accepted source as SOURCE=DIR.")
     merge.add_argument("--output-dir", required=True, type=Path)
     merge.set_defaults(func=merge_accepted)
 

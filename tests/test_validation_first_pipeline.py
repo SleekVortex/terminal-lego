@@ -69,16 +69,20 @@ def test_collect_failures_marks_regen_eligibility(tmp_path: Path) -> None:
 def test_merge_accepted_copies_baseline_and_regenerated_tasks(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline_validated"
     regenerated = tmp_path / "regenerated_validated"
+    repair = tmp_path / "repair_validated"
     make_complete_task(baseline, "task_00001")
     make_complete_task(baseline, "task_00002")
     make_complete_task(regenerated, "task_00002")
     make_complete_task(regenerated, "task_00003")
+    make_complete_task(repair, "task_00004")
     output_dir = tmp_path / "final_accepted"
 
     vfp.merge_accepted(
         argparse.Namespace(
             baseline_validated_dir=baseline,
             regenerated_validated_dir=regenerated,
+            repair_validated_dir=repair,
+            extra_validated_dir=[],
             output_dir=output_dir,
         )
     )
@@ -87,9 +91,10 @@ def test_merge_accepted_copies_baseline_and_regenerated_tasks(tmp_path: Path) ->
         "task_00001",
         "task_00002",
         "task_00003",
+        "task_00004",
     ]
     report = json.loads((output_dir / "final_accepted_report.json").read_text(encoding="utf-8"))
-    assert report["final_accepted"] == 3
+    assert report["final_accepted"] == 4
     assert report["duplicates"] == 1
     duplicate_rows = [row for row in report["rows"] if row["duplicate"]]
     assert duplicate_rows == [{"task": "task_00002", "source": "regenerated", "copied": True, "duplicate": True}]

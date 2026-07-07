@@ -17,6 +17,7 @@ ENTRYPOINTS = [
     "scripts.repair_failed_tasks",
     "scripts.diagnose_failed_tasks",
     "scripts.validation_first_pipeline",
+    "scripts.run_task_pipeline",
 ]
 
 

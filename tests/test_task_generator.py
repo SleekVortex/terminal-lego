@@ -12,7 +12,7 @@ from generator import llm_client
 from generator import task_generator as cli
 from generator.contracts import SOQuestion
 from generator.llm_client import TokenTracker, call_llm_api, is_truncated
-from generator.orchestrator import TaskGenerator
+from generator.task_builder import TaskGenerator
 from generator.prompt_loader import (
     DOCKERFILE_PROMPT_TEMPLATE,
     ENVIRONMENT_PROMPT_TEMPLATE,

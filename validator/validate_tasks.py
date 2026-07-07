@@ -175,6 +175,28 @@ def validate_task(task_dir: Path, output_dir: Path, timeout: int, total: int) ->
     return TaskValidator(output_dir, timeout).validate(task_dir, total)
 
 
+def load_task_filter(path: Path | None) -> set[str] | None:
+    if path is None:
+        return None
+    tasks: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            tasks.add(line)
+            continue
+        if isinstance(row, dict):
+            task_name = row.get("task") or row.get("task_name")
+            if task_name:
+                tasks.add(str(task_name))
+        elif isinstance(row, str):
+            tasks.add(row)
+    return tasks
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Docker Round-Trip Validator")
     parser.add_argument("--input", "-i", required=True, help="Input directory with candidate tasks")
@@ -182,6 +204,7 @@ def main() -> None:
     parser.add_argument("--workers", "-w", type=int, default=8, help="Parallel workers")
     parser.add_argument("--timeout", "-t", type=int, default=300, help="Timeout per step (seconds)")
     parser.add_argument("--limit", "-l", type=int, default=None, help="Limit tasks to validate")
+    parser.add_argument("--task-list", type=Path, default=None, help="JSONL or text file with task names to validate.")
     args = parser.parse_args()
 
     input_dir = Path(args.input)
@@ -190,6 +213,9 @@ def main() -> None:
     add_output_file_logger(output_dir / "validate_tasks.log")
 
     task_dirs = sorted(d for d in input_dir.iterdir() if d.is_dir() and d.name.startswith("task_"))
+    task_filter = load_task_filter(args.task_list)
+    if task_filter is not None:
+        task_dirs = [task_dir for task_dir in task_dirs if task_dir.name in task_filter]
     if args.limit:
         task_dirs = task_dirs[: args.limit]
 

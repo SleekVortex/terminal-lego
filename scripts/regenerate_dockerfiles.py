@@ -18,7 +18,6 @@ except ModuleNotFoundError:  # pragma: no cover
 from generator import llm_client
 from generator.contracts import SOQuestion
 from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker
-from generator.orchestrator import TaskGenerator
 from generator.prompt_loader import DOCKERFILE_PROMPT_TEMPLATE, SYSTEM_PROMPT
 from generator.reviewers.dockerfile_review import (
     ensure_verifier_deps,
@@ -26,6 +25,7 @@ from generator.reviewers.dockerfile_review import (
     review_dockerfile,
 )
 from generator.settings import DOCKERFILE_MAX_ATTEMPTS
+from generator.task_builder import TaskGenerator
 from generator.task_writer import format_env_file_list
 
 

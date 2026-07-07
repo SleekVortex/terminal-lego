@@ -36,6 +36,7 @@ def test_solver_layer_does_not_depend_on_task_generation_agents() -> None:
         text = path.read_text(encoding="utf-8")
         assert "generator.agents" not in text, path
         assert "generator.orchestrator" not in text, path
+        assert "generator.task_builder" not in text, path
         assert "generator.task_generator" not in text, path
 
 

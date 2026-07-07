@@ -185,7 +185,7 @@ class RepairAttempt:
 generator/
   contracts.py
   llm_client.py
-  orchestrator.py
+  task_builder.py
   task_writer.py
   agents/
     __init__.py
@@ -287,7 +287,7 @@ Reviewer-ы - deterministic code, без LLM.
   - no forbidden network calls;
   - common path sanity.
 
-### `generator/orchestrator.py`
+### `generator/task_builder.py`
 
 Главный state machine одного task:
 
@@ -710,12 +710,12 @@ This is the highest-priority phase because current failed tasks only say `reward
 
 - Add `generator/contracts.py`.
 - Add `generator/agents/task_generation.py`.
-- Move orchestration into `generator/orchestrator.py`.
+- Move orchestration into `generator/task_builder.py`.
 - Keep only the generated Terminal-Bench task directory format unchanged.
 
 ### Phase 4. Multi-Agent Orchestrator
 
-- Add `generator/orchestrator.py`.
+- Add `generator/task_builder.py`.
 - Split environment/solution/tests/dockerfile agents.
 - Keep task prompts under `prompts/task_generator/` and repair prompt under `prompts/repair/`.
 - Add fake-LLM integration tests.

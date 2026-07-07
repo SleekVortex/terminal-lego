@@ -7,7 +7,7 @@
 - `scripts/generate_tasks.sh` - convenience wrapper для подготовки seed и запуска генератора.
 - `sources/stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
 - `generator/task_generator.py` - CLI entrypoint генерации задач.
-- `generator/orchestrator.py` - координатор одной задачи без prompt text и Docker subprocess logic.
+- `generator/task_builder.py` - координатор одной задачи без prompt text и Docker subprocess logic.
 - `generator/agents/task_generation.py` - LLM agents для `instruction`, `environment`, `solution`, `tests`, `Dockerfile`.
 - `generator/repair/agent.py` и `generator/repair/loop.py` - controlled repair loop для failed задач.
 - `prompts/task_generator/*.md` - prompt templates для стадий генерации.
@@ -457,15 +457,42 @@ validated/validate_tasks.log
 
 ## Validation-First Flow
 
-Для большого generated set текущая рабочая схема состоит из трех этапов:
+Для большого generated set есть верхнеуровневый runner полного цикла:
+
+```bash
+python -m scripts.run_task_pipeline \
+  --input ./questions.jsonl \
+  --output ./terminal-lego-work/task-pipeline/run-name \
+  --generate-workers 24 \
+  --validate-workers 64 \
+  --dockerfile-workers 8 \
+  --repair-workers 4 \
+  --timeout 300 \
+  --resume
+```
+
+Он выполняет:
 
 ```text
-1. validate all current candidates
-2. keep tasks where reference solution passes verifier
-3. regenerate Dockerfile only for failed tasks with complete artifacts
-4. validate regenerated failed tasks
-5. merge accepted baseline + accepted regenerated tasks
+1. prepare StackOverflow seed
+2. generate candidates
+3. validate baseline candidates
+4. collect failed tasks
+5. regenerate Dockerfile for eligible failures
+6. validate regenerated failed tasks
+7. diagnose remaining failures
+8. run repair loop with validation
+9. merge accepted baseline + regenerated + repaired tasks
 ```
+
+Финальный датасет accepted tasks лежит в:
+
+```text
+RUN_DIR/accepted/
+RUN_DIR/pipeline_summary.json
+```
+
+Ниже описаны те же стадии как отдельные ручные команды.
 
 Сначала запускается baseline validation текущих candidates:
 
@@ -504,6 +531,7 @@ python -m scripts.regenerate_dockerfiles \
 python scripts/validation_first_pipeline.py merge-accepted \
   --baseline-validated-dir ./validation/baseline_current_dockerfiles \
   --regenerated-validated-dir ./validation/regenerated_dockerfiles \
+  --repair-validated-dir ./repair/repaired_validated \
   --output-dir ./validation/final_accepted
 ```
 

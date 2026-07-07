@@ -20,7 +20,7 @@ from generator.llm_client import (
     call_llm_api,
     token_tracker,
 )
-from generator.orchestrator import TaskGenerator as _OrchestratorTaskGenerator
+from generator.task_builder import TaskGenerator as _TaskBuilder
 from generator.resume import build_task_args as _build_task_args
 
 
@@ -47,7 +47,7 @@ error_counter = Counter()
 skip_counter = Counter()
 
 
-class TaskGenerator(_OrchestratorTaskGenerator):
+class TaskGenerator(_TaskBuilder):
     """Bind the orchestrator to the CLI-configured LLM client."""
 
     def __init__(self, question: SOQuestion, output_dir: Path, index: int | None = None) -> None:

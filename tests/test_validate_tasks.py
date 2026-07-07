@@ -38,6 +38,24 @@ def test_atomic_counter_increment() -> None:
     assert counter.increment() == 2
 
 
+def test_load_task_filter_accepts_jsonl_and_plain_text(tmp_path: Path) -> None:
+    task_list = tmp_path / "tasks.jsonl"
+    task_list.write_text(
+        "\n".join(
+            [
+                json.dumps({"task": "task_00001"}),
+                json.dumps({"task_name": "task_00002"}),
+                "task_00003",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert vt.load_task_filter(task_list) == {"task_00001", "task_00002", "task_00003"}
+    assert vt.load_task_filter(None) is None
+
+
 def test_docker_safe_name_replaces_invalid_repository_chars() -> None:
     assert docker_safe_name("task_00000") == "task-00000"
     assert docker_safe_name("Task__With bad/chars") == "task-with-bad-chars"
