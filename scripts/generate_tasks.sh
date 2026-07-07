@@ -93,7 +93,8 @@ if [[ "${SORT_BY_SCORE}" != "0" ]]; then
   prepare_args+=(--sort-by-score)
 fi
 
-python "${REPO_DIR}/stackoverflow/prepare_dataset.py" "${prepare_args[@]}"
+cd "$REPO_DIR"
+python -m sources.stackoverflow.prepare_dataset "${prepare_args[@]}"
 
 generator_args=(
   --input "${SEED_JSON}"
@@ -114,7 +115,6 @@ if [[ "${RESUME:-0}" == "1" ]]; then
   generator_args+=(--resume)
 fi
 
-cd "$REPO_DIR"
 python -m generator.task_generator "${generator_args[@]}" "$@"
 
 echo "Seed: ${SEED_JSON}"

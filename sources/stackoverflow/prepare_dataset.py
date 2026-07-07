@@ -13,25 +13,16 @@ from __future__ import annotations
 import argparse
 import heapq
 import json
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-try:
-    from .tag_taxonomy import (
-        CATEGORY_ORDER,
-        TERMINAL_BENCH_2_DISTRIBUTION,
-        classify_tags,
-        scaled_quotas,
-    )
-except ImportError:  # pragma: no cover - supports direct script execution.
-    from tag_taxonomy import (  # type: ignore
-        CATEGORY_ORDER,
-        TERMINAL_BENCH_2_DISTRIBUTION,
-        classify_tags,
-        scaled_quotas,
-    )
+from .tag_taxonomy import (
+    CATEGORY_ORDER,
+    TERMINAL_BENCH_2_DISTRIBUTION,
+    classify_tags,
+    scaled_quotas,
+)
 
 
 ScoreKey = Tuple[int, int, int, int]
@@ -415,5 +406,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
-
+    raise SystemExit(main())

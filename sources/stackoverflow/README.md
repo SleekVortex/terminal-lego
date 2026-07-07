@@ -1,7 +1,7 @@
 # StackOverflow dump datasets
 
 This directory contains the local-dump StackOverflow preparation flow used before
-`generator/task_generator.py`.
+`python -m generator.task_generator`.
 
 The expected input is JSONL produced from `Posts.xml` with at least:
 
@@ -30,7 +30,7 @@ they are missing, `prepare_dataset.py` classifies the row from tags using
 Balanced smoke seed from an already-filtered JSONL:
 
 ```bash
-python stackoverflow/prepare_dataset.py \
+python -m sources.stackoverflow.prepare_dataset \
   --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
   --output ./data/so_seed_balanced32.json \
   --format generator-json \
@@ -41,7 +41,7 @@ python stackoverflow/prepare_dataset.py \
 Then generate tasks:
 
 ```bash
-python generator/task_generator.py \
+python -m generator.task_generator \
   --input ./data/so_seed_balanced32.json \
   --output ./data/candidates_so_seed_balanced32 \
   --workers 1 \
@@ -53,7 +53,7 @@ python generator/task_generator.py \
 ## Create a 100k benchmark-distribution JSONL
 
 ```bash
-python stackoverflow/prepare_dataset.py \
+python -m sources.stackoverflow.prepare_dataset \
   --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_jsonl_20260702T165727+0300/questions.jsonl \
   --output ./data/so_top100k_tbench_dist.jsonl \
   --format jsonl \

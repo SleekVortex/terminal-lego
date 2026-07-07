@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from stackoverflow import tag_taxonomy as taxonomy
+from sources.stackoverflow import tag_taxonomy as taxonomy
 
 
 def test_normalize_tag_strips_and_lowercases() -> None:

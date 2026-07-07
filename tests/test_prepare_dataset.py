@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from stackoverflow import prepare_dataset as prep
+from sources.stackoverflow import prepare_dataset as prep
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:

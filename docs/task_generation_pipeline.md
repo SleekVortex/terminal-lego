@@ -5,7 +5,7 @@
 ## Основные Файлы
 
 - `scripts/generate_tasks.sh` - convenience wrapper для подготовки seed и запуска генератора.
-- `stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
+- `sources/stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
 - `generator/task_generator.py` - CLI entrypoint генерации задач.
 - `generator/orchestrator.py` - координатор одной задачи без prompt text и Docker subprocess logic.
 - `generator/agents/task_generation.py` - LLM agents для `instruction`, `environment`, `solution`, `tests`, `Dockerfile`.
@@ -19,7 +19,7 @@
 
 ```text
 StackOverflow JSONL
-  -> stackoverflow/prepare_dataset.py
+  -> sources/stackoverflow/prepare_dataset.py
   -> seed.json, формат {"metadata": ..., "questions": [...]}
   -> generator/task_generator.py
   -> candidates/task_XXXXX/
@@ -40,7 +40,7 @@ Wrapper пишет:
 
 ## Подготовка Seed
 
-`stackoverflow/prepare_dataset.py` принимает JSONL, где каждая строка - StackOverflow question row с `accepted_answer`.
+`sources/stackoverflow/prepare_dataset.py` принимает JSONL, где каждая строка - StackOverflow question row с `accepted_answer`.
 
 Поддерживаемые входные поля нормализуются в контракт генератора:
 
@@ -65,7 +65,7 @@ Wrapper пишет:
 }
 ```
 
-Если `categories` отсутствуют, они восстанавливаются через `stackoverflow/tag_taxonomy.py` по тегам. `selected_category` берется из входа, иначе из первой найденной категории.
+Если `categories` отсутствуют, они восстанавливаются через `sources/stackoverflow/tag_taxonomy.py` по тегам. `selected_category` берется из входа, иначе из первой найденной категории.
 
 Фильтры и режимы выборки:
 

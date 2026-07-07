@@ -37,7 +37,7 @@ Required environment variables:
 
 ## 2. Generate Tasks From StackOverflow JSONL
 
-For local StackOverflow dumps, use `stackoverflow/prepare_dataset.py` before
+For local StackOverflow dumps, use `sources/stackoverflow/prepare_dataset.py` before
 task generation. It reads dump-derived JSONL rows, classifies rows into
 Terminal-Bench categories from tags, and writes either JSONL or the generator
 contract `{"metadata": ..., "questions": [...]}`.
@@ -45,7 +45,7 @@ contract `{"metadata": ..., "questions": [...]}`.
 Balanced smoke seed:
 
 ```bash
-python stackoverflow/prepare_dataset.py \
+python -m sources.stackoverflow.prepare_dataset \
     --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
     --output ./data/so_seed_balanced32.json \
     --format generator-json \
@@ -56,7 +56,7 @@ python stackoverflow/prepare_dataset.py \
 100k set close to the Terminal-Bench 2.0 category distribution:
 
 ```bash
-python stackoverflow/prepare_dataset.py \
+python -m sources.stackoverflow.prepare_dataset \
     --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_jsonl_20260702T165727+0300/questions.jsonl \
     --output ./data/so_top100k_tbench_dist.jsonl \
     --format jsonl \
@@ -66,7 +66,7 @@ python stackoverflow/prepare_dataset.py \
 ```
 
 The tag taxonomy and benchmark distribution are in
-`stackoverflow/terminal_bench_tag_taxonomy.json`.
+`sources/stackoverflow/terminal_bench_tag_taxonomy.json`.
 
 For task generation from StackOverflow JSONL, the convenience wrapper is:
 
