@@ -32,6 +32,12 @@ def test_atomic_counter_increment() -> None:
     assert counter.increment() == 2
 
 
+def test_docker_safe_name_replaces_invalid_repository_chars() -> None:
+    assert vt.docker_safe_name("task_00000") == "task-00000"
+    assert vt.docker_safe_name("Task__With bad/chars") == "task-with-bad-chars"
+    assert vt.docker_safe_name("___") == "task"
+
+
 def test_validate_task_reports_missing_required_files(tmp_path: Path) -> None:
     output = tmp_path / "validated"
     task = tmp_path / "task_00000"
@@ -57,7 +63,7 @@ def test_validate_task_passes_and_copies_task_with_mocked_docker(monkeypatch, tm
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None):
         commands.append(cmd)
-        if cmd[:3] == ["docker", "exec", "tl-val-task_00000-" + str(vt.os.getpid())] and cmd[-1] == "/logs/verifier/reward.txt":
+        if cmd[:3] == ["docker", "exec", "tl-val-task-00000-" + str(vt.os.getpid())] and cmd[-1] == "/logs/verifier/reward.txt":
             return completed(cmd, stdout="1\n")
         return completed(cmd)
 
@@ -71,6 +77,7 @@ def test_validate_task_passes_and_copies_task_with_mocked_docker(monkeypatch, tm
     assert (output / "task_00000" / "solution" / "solve.sh").exists()
     assert vt.passed.value == 1
     assert any(cmd[:2] == ["docker", "build"] for cmd in commands)
+    assert any(cmd[:4] == ["docker", "build", "-t", "tl-validate-task-00000"] for cmd in commands)
     assert any(cmd[:2] == ["docker", "rm"] for cmd in commands)
 
 

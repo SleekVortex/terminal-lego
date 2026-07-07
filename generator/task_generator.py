@@ -50,6 +50,7 @@ TEMP_ENVIRONMENT = None
 TEMP_SOLUTION = None
 TEMP_TESTS = None
 TEMP_DOCKERFILE = None
+DOCKERFILE_MAX_ATTEMPTS = 3
 
 # ============================================================================
 # Logging
@@ -725,6 +726,111 @@ def _ensure_verifier_deps(dockerfile: str) -> str:
     return VERIFIER_PYTHON_STAGE.rstrip() + "\n\n" + _insert_before_task_file_copy(text, VERIFIER_PYTHON_COPY)
 
 
+def _extract_dockerfile_from_response(response: str) -> Optional[str]:
+    match = re.search(r'```dockerfile\n?(.*?)```', response, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r'```\n?(.*?)```', response, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _normalize_copy_source(source: str) -> str:
+    source = source.strip().strip('"').strip("'")
+    while source.startswith("./"):
+        source = source[2:]
+    return source.rstrip("/")
+
+
+def _env_artifact_paths(env_data: Optional[Dict[str, Any]]) -> set[str]:
+    if not env_data:
+        return {"task_file"}
+    paths = {_normalize_copy_source(path) for path in env_data.get("directories", []) if path}
+    paths.update(_normalize_copy_source(path) for path in env_data.get("files", {}) if path)
+    paths.discard("")
+    if not paths:
+        paths.add("task_file")
+    return paths
+
+
+def _env_path_exists(source: str, env_paths: set[str]) -> bool:
+    source = _normalize_copy_source(source)
+    if not source or source == ".":
+        return True
+    if source in env_paths:
+        return True
+    prefix = source + "/"
+    return any(path.startswith(prefix) for path in env_paths)
+
+
+def _parse_copy_sources(line: str) -> list[str]:
+    stripped = line.strip()
+    if not stripped.upper().startswith("COPY "):
+        return []
+    rest = stripped[5:].strip()
+    if not rest or "--from=" in rest or rest.startswith("<<"):
+        return []
+    while rest.startswith("--"):
+        parts = rest.split(None, 1)
+        if len(parts) == 1:
+            return []
+        rest = parts[1].strip()
+    if rest.startswith("["):
+        try:
+            values = json.loads(rest)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(values, list) and len(values) >= 2:
+            return [str(value) for value in values[:-1]]
+        return []
+    parts = rest.split()
+    if len(parts) < 2:
+        return []
+    return parts[:-1]
+
+
+def _review_dockerfile(dockerfile: str, env_data: Optional[Dict[str, Any]] = None) -> dict:
+    issues = []
+    text = dockerfile.strip()
+    if not text:
+        return {"pass": False, "issues": ["Dockerfile is empty"]}
+    if not re.search(r"(?im)^FROM\s+\S+", text):
+        issues.append("Dockerfile must contain a FROM instruction")
+    if re.search(r"(?is)apt-get\s+install\s+-y(?:\s+--no-install-recommends)?\s*(?:&&|;)", text):
+        issues.append("empty apt-get install command")
+    if "astral.sh/uv" in text or re.search(r"(?im)\buvx\b", text):
+        issues.append("Dockerfile must not install or run uv/uvx test-runtime tooling")
+    if not (_has_python_312_plus(text) and _has_pytest_for_verifier(text)):
+        issues.append("Dockerfile must include Python 3.12+ and pytest for verifier")
+
+    env_paths = _env_artifact_paths(env_data)
+    copy_sources = []
+    for line in text.splitlines():
+        copy_sources.extend(_parse_copy_sources(line))
+    normalized_sources = {_normalize_copy_source(source) for source in copy_sources}
+    copies_all_context = "." in normalized_sources
+
+    missing_sources = [
+        source for source in sorted(normalized_sources)
+        if source and not _env_path_exists(source, env_paths)
+    ]
+    if missing_sources:
+        issues.append("COPY references missing build-context paths: " + ", ".join(missing_sources[:5]))
+
+    root_paths = sorted({path.split("/", 1)[0] for path in env_paths if path})
+    missing_root_paths = [
+        path for path in root_paths
+        if path not in normalized_sources
+        and not copies_all_context
+        and not any(src and path.startswith(src + "/") for src in normalized_sources)
+    ]
+    if missing_root_paths:
+        issues.append("Dockerfile does not copy environment artifacts: " + ", ".join(missing_root_paths[:5]))
+
+    return {"pass": not issues, "issues": issues}
+
+
 class TaskGenerator:
     def __init__(self, question: SOQuestion, output_dir: Path, index: int = None):
         self.question = question
@@ -765,7 +871,10 @@ class TaskGenerator:
                 skip_counter.increment()
                 return False
 
-            dockerfile = self._generate_dockerfile(instruction)
+            dockerfile = self._generate_dockerfile(instruction, env_data, solution, test_data)
+            if not dockerfile:
+                logger.error(f"[{self.task_name}] Failed to generate valid Dockerfile")
+                return False
 
             self._write_files(instruction, env_data, test_data, solution, dockerfile, difficulty)
             return True
@@ -968,27 +1077,57 @@ class TaskGenerator:
 
         return {"pass": not issues, "issues": issues}
 
-    def _generate_dockerfile(self, instruction: str) -> str:
-        prompt = DOCKERFILE_PROMPT_TEMPLATE.format(
+    def _generate_dockerfile(
+        self,
+        instruction: str,
+        env_data: Optional[Dict[str, Any]] = None,
+        solution: str = "",
+        test_data: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        env_file_list = self._format_env_file_list(env_data or {"files": {}, "directories": ["task_file"]})
+        test_outputs_py = ""
+        if test_data:
+            test_outputs_py = test_data.get("test_outputs_py", "")
+        base_prompt = DOCKERFILE_PROMPT_TEMPLATE.format(
             instruction=instruction,
             tags=', '.join(self.question.tags),
+            env_file_list=env_file_list,
+            solution=solution,
+            test_outputs_py=test_outputs_py,
         )
-        response = call_llm_api(
-            prompt,
-            SYSTEM_PROMPT,
-            temperature=TEMP_DOCKERFILE,
-            task_name=self.task_name,
-            stage="dockerfile",
-        )
-        if not response:
-            return self._default_dockerfile()
-        match = re.search(r'```dockerfile\n?(.*?)```', response, re.DOTALL)
-        if match:
-            return _ensure_verifier_deps(match.group(1))
-        match = re.search(r'```\n?(.*?)```', response, re.DOTALL)
-        if match:
-            return _ensure_verifier_deps(match.group(1))
-        return _ensure_verifier_deps(self._default_dockerfile())
+        feedback = ""
+        for attempt in range(DOCKERFILE_MAX_ATTEMPTS):
+            prompt = base_prompt
+            if feedback:
+                prompt += (
+                    "\n\nPrevious Dockerfile attempt was rejected for these issues:\n"
+                    + feedback
+                    + "\nRegenerate only the Dockerfile."
+                )
+            response = call_llm_api(
+                prompt,
+                SYSTEM_PROMPT,
+                temperature=TEMP_DOCKERFILE,
+                task_name=self.task_name,
+                stage="dockerfile",
+            )
+            if not response:
+                feedback = "- LLM returned no Dockerfile response"
+                logger.warning(f"[{self.task_name}] Dockerfile generation returned no response (round {attempt + 1})")
+                continue
+            extracted = _extract_dockerfile_from_response(response)
+            if not extracted:
+                feedback = "- Dockerfile response did not contain a fenced Dockerfile block"
+                logger.warning(f"[{self.task_name}] Dockerfile parse failed (round {attempt + 1})")
+                continue
+            dockerfile = _ensure_verifier_deps(extracted)
+            review = _review_dockerfile(dockerfile, env_data)
+            if review.get("pass"):
+                return dockerfile
+            issues = review.get("issues", [])
+            feedback = "\n".join(f"- {issue}" for issue in issues)
+            logger.warning(f"[{self.task_name}] Dockerfile review rejected (round {attempt + 1}): {issues}")
+        return None
 
     def _assess_difficulty(self, instruction: str) -> str:
         body = clean_html(self.question.body)
@@ -1004,14 +1143,12 @@ class TaskGenerator:
         return "medium"
 
     def _default_dockerfile(self) -> str:
-        return """FROM python:3.12-slim-bookworm
+        return """FROM ubuntu:22.04
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \\
     bash coreutils findutils grep sed gawk curl wget git \\
     && rm -rf /var/lib/apt/lists/*
-
-RUN python -m pip install --no-cache-dir pytest
 
 COPY ./task_file /app/task_file
 """
@@ -1071,6 +1208,8 @@ storage = "5G"
         (self.task_dir / "environment").mkdir(exist_ok=True)
         (self.task_dir / "tests").mkdir(exist_ok=True)
         (self.task_dir / "solution").mkdir(exist_ok=True)
+
+        dockerfile = _ensure_verifier_deps(dockerfile)
 
         (self.task_dir / "instruction.md").write_text(instruction, encoding='utf-8')
         (self.task_dir / "task.toml").write_text(self._generate_task_toml(difficulty), encoding='utf-8')

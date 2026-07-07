@@ -133,6 +133,20 @@ def test_prompt_templates_are_loaded_from_prompt_files() -> None:
         assert prompt == (tg.PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
 
 
+def test_dockerfile_prompt_is_runtime_first() -> None:
+    prompt = tg.DOCKERFILE_PROMPT_TEMPLATE
+
+    assert "Choose the base image for the task runtime first." in prompt
+    assert "Do not choose a Python image only because the verifier uses Python." in prompt
+    assert "The generator will add offline verifier dependencies separately" in prompt
+    assert "Prefer `python:3.12-slim-bookworm`" not in prompt
+    assert "General Linux/shell tasks: `ubuntu:22.04`" in prompt
+    assert "Node.js tasks: `node:20-slim`" in prompt
+    assert "{env_file_list}" in prompt
+    assert "{solution}" in prompt
+    assert "{test_outputs_py}" in prompt
+
+
 def test_token_tracker_records_stage_telemetry(tmp_path: Path) -> None:
     usage_path = tmp_path / "usage.json"
     tracker = tg.TokenTracker(str(usage_path))
@@ -197,13 +211,125 @@ def test_generation_steps_parse_llm_responses(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "```bash\n#!/bin/bash\necho ok\n```")
     assert generator._generate_solution("instruction", env_data) == "#!/bin/bash\necho ok"
 
-    monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "```dockerfile\nFROM ubuntu:22.04\n```")
+    monkeypatch.setattr(
+        tg,
+        "call_llm_api",
+        lambda *args, **kwargs: "```dockerfile\nFROM ubuntu:22.04\nWORKDIR /app\nCOPY ./task_file /app/task_file\n```",
+    )
     dockerfile = generator._generate_dockerfile("instruction")
     assert dockerfile.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
     assert "FROM ubuntu:22.04" in dockerfile
     assert "COPY --from=verifier_python /usr/local /usr/local" in dockerfile
 
     assert generator._assess_difficulty("instruction") == "easy"
+
+
+def test_generate_dockerfile_prompt_includes_generated_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    generator = tg.TaskGenerator(make_question(tags=["node.js", "npm"]), tmp_path)
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, *args, **kwargs) -> str:
+        captured["prompt"] = prompt
+        return (
+            "```dockerfile\nFROM node:20-slim\nWORKDIR /app\n"
+            "COPY ./package.json /app/package.json\n"
+            "COPY ./task_file /app/task_file\n```"
+        )
+
+    monkeypatch.setattr(tg, "call_llm_api", fake_call)
+
+    dockerfile = generator._generate_dockerfile(
+        "Build the package.",
+        {
+            "directories": ["task_file/input"],
+            "files": {
+                "task_file/input/data.json": "{}",
+                "package.json": "{\"scripts\":{\"test\":\"node index.js\"}}",
+            },
+        },
+        "#!/bin/bash\nnpm install\nnode index.js\n",
+        {"test_outputs_py": "def test_ok():\n    assert True\n"},
+    )
+
+    prompt = captured["prompt"]
+    assert "[file] /app/package.json" in prompt
+    assert "npm install" in prompt
+    assert "def test_ok()" in prompt
+    assert "FROM node:20-slim" in dockerfile
+    assert "COPY --from=verifier_python /usr/local /usr/local" in dockerfile
+
+
+def test_review_dockerfile_rejects_invalid_patterns() -> None:
+    review = tg._review_dockerfile(
+        """FROM ubuntu:22.04
+WORKDIR /app
+RUN apt-get update && apt-get install -y && rm -rf /var/lib/apt/lists/*
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+COPY ./missing /app/missing
+""",
+        {"directories": ["task_file"], "files": {"task_file/input.txt": "x"}},
+    )
+
+    assert not review["pass"]
+    assert "empty apt-get install command" in review["issues"]
+    assert "Dockerfile must not install or run uv/uvx test-runtime tooling" in review["issues"]
+    assert any(issue.startswith("Dockerfile must include Python 3.12+ and pytest") for issue in review["issues"])
+    assert any(issue.startswith("COPY references missing build-context paths") for issue in review["issues"])
+
+
+def test_review_dockerfile_accepts_runtime_image_with_artifacts() -> None:
+    dockerfile = tg._ensure_verifier_deps(
+        """FROM node:20-slim
+WORKDIR /app
+COPY ./package.json /app/package.json
+COPY ./task_file /app/task_file
+"""
+    )
+
+    review = tg._review_dockerfile(
+        dockerfile,
+        {
+            "directories": ["task_file"],
+            "files": {
+                "task_file/input.json": "{}",
+                "package.json": "{\"scripts\":{\"test\":\"node index.js\"}}",
+            },
+        },
+    )
+
+    assert review == {"pass": True, "issues": []}
+
+
+def test_generate_dockerfile_retries_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    generator = tg.TaskGenerator(make_question(tags=["node.js"]), tmp_path)
+    prompts = []
+    responses = iter(
+        [
+            "```dockerfile\nFROM ubuntu:22.04\nWORKDIR /app\nCOPY ./missing /app/missing\n```",
+            "```dockerfile\nFROM node:20-slim\nWORKDIR /app\nCOPY ./task_file /app/task_file\n```",
+        ]
+    )
+
+    def fake_call(prompt: str, *args, **kwargs) -> str:
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(tg, "call_llm_api", fake_call)
+
+    dockerfile = generator._generate_dockerfile(
+        "Run the Node script.",
+        {"directories": ["task_file"], "files": {"task_file/input.txt": "x"}},
+        "#!/bin/bash\nnode script.js\n",
+        {"test_outputs_py": "def test_ok():\n    assert True\n"},
+    )
+
+    assert dockerfile is not None
+    assert "FROM node:20-slim" in dockerfile
+    assert len(prompts) == 2
+    assert "Previous Dockerfile attempt was rejected" in prompts[1]
 
 
 def test_assess_difficulty_is_deterministic_without_llm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -258,9 +384,22 @@ def test_generate_environment_and_dockerfile_fallbacks(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(tg, "call_llm_api", lambda *args, **kwargs: "not json")
     assert generator._generate_environment("instruction") == {"files": {}, "directories": ["task_file"]}
-    dockerfile = generator._generate_dockerfile("instruction")
-    assert dockerfile.startswith("FROM python:3.12-slim-bookworm")
-    assert "python -m pip install --no-cache-dir pytest" in dockerfile
+    assert generator._generate_dockerfile("instruction") is None
+
+
+def test_ensure_verifier_deps_preserves_non_python_runtime_base_images() -> None:
+    for base_image in ("node:20-slim", "golang:1.21-bookworm"):
+        dockerfile = f"""FROM {base_image}
+WORKDIR /app
+COPY ./task_file /app/task_file
+"""
+
+        patched = tg._ensure_verifier_deps(dockerfile)
+
+        assert patched.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
+        assert f"FROM {base_image}" in patched
+        assert "COPY --from=verifier_python /usr/local /usr/local" in patched
+        assert patched.index(f"FROM {base_image}") < patched.index("COPY --from=verifier_python")
 
 
 def test_generate_tests_retries_syntax_and_uses_static_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -396,7 +535,11 @@ def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
 
     task_dir = tmp_path / "task_00007"
     assert (task_dir / "instruction.md").read_text(encoding="utf-8") == "# Task"
-    assert (task_dir / "environment" / "Dockerfile").read_text(encoding="utf-8") == "FROM ubuntu:22.04\n"
+    written_dockerfile = (task_dir / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert written_dockerfile.startswith("FROM python:3.12-slim-bookworm AS verifier_python")
+    assert "FROM ubuntu:22.04" in written_dockerfile
+    assert "COPY --from=verifier_python /usr/local /usr/local" in written_dockerfile
+    assert "RUN python -m pip install --no-cache-dir pytest" in written_dockerfile
     assert (task_dir / "environment" / "task_file" / "input" / "data.txt").read_text(encoding="utf-8") == "data"
     assert (task_dir / "tests" / "test.sh").read_text(encoding="utf-8") == tg.STATIC_TEST_SH
     assert (task_dir / "tests" / "test_outputs.py").exists()

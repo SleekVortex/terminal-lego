@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -63,14 +64,23 @@ passed = AtomicCounter()
 failed = AtomicCounter()
 build_failed = AtomicCounter()
 error_count = AtomicCounter()
+
+
+def docker_safe_name(value: str) -> str:
+    safe = re.sub(r"[^a-z0-9.-]+", "-", value.lower())
+    safe = re.sub(r"-+", "-", safe).strip(".-")
+    return safe or "task"
+
+
 def run_cmd(cmd: list, timeout: int = 300, capture: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
 
 
 def validate_task(task_dir: Path, output_dir: Path, timeout: int, total: int) -> dict:
     task_name = task_dir.name
-    image_tag = f"tl-validate-{task_name}".lower()
-    container_name = f"tl-val-{task_name}-{os.getpid()}".lower()
+    safe_task_name = docker_safe_name(task_name)
+    image_tag = f"tl-validate-{safe_task_name}"
+    container_name = f"tl-val-{safe_task_name}-{os.getpid()}"
     result = {
         "task": task_name,
         "status": "unknown",

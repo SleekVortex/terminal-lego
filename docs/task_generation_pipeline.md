@@ -305,33 +305,50 @@ Prompt для этой стадии явно синхронизирован с r
 
 ### 6. `environment/Dockerfile`
 
-Метод: `_generate_dockerfile(instruction)`.
+Метод: `_generate_dockerfile(instruction, env_data, solution, test_data)`.
 
-Prompt получает generated `instruction` и tags.
+Prompt получает:
+
+- generated `instruction`;
+- tags;
+- список generated environment artifacts из `_format_env_file_list(env_data)`;
+- generated `solution/solve.sh`;
+- generated `tests/test_outputs.py`.
 
 Temperature по умолчанию не передается: `TEMP_DOCKERFILE = None`.
 
-Ответ извлекается из ```dockerfile или generic fenced block. Если ответ отсутствует или не извлечен, используется fallback:
+Prompt выбирает Docker base image под runtime задачи, а не под verifier:
 
-```dockerfile
-FROM python:3.12-slim-bookworm
-WORKDIR /app
+- Python tasks: `python:3.12-slim-bookworm` или новее;
+- Node.js tasks: `node:20-slim`;
+- Java tasks: `openjdk:17-slim` или Maven/Gradle image;
+- Go tasks: `golang:1.21-bookworm`;
+- Rust/PHP/Swift/CUDA/.NET tasks: соответствующий runtime image;
+- general Linux/shell tasks: `ubuntu:22.04`.
 
-RUN apt-get update && apt-get install -y \
-    bash coreutils findutils grep sed gawk curl wget git \
-    && rm -rf /var/lib/apt/lists/*
+Python 3.12+ и `pytest` для verifier добавляются генератором отдельно, поэтому Dockerfile не должен выбирать Python base только ради `/tests/test.sh`.
 
-RUN python -m pip install --no-cache-dir pytest
+Список артефактов нужен, чтобы Dockerfile видел весь build context: например `requirements.txt`, `package.json`, `setup.sh`, `init.sh`, config files и `task_file/...`. Reference solution и verifier test code передаются как context для выбора runtime packages и base image.
 
-COPY ./task_file /app/task_file
-```
+Ответ извлекается из ```dockerfile или generic fenced block. Если ответ отсутствует, не извлекается или не проходит static review, стадия retry-ится до `DOCKERFILE_MAX_ATTEMPTS = 3`. Fallback Dockerfile больше не записывается: если после retry нет валидного Dockerfile, задача считается failed и не попадает в candidates.
 
 После извлечения Dockerfile генератор дополнительно вызывает `_ensure_verifier_deps()`. Он гарантирует build-time наличие Python 3.12+ и `pytest` для verifier:
 
 - если Dockerfile уже основан на Python 3.12+ image, добавляет `RUN python -m pip install --no-cache-dir pytest` до `COPY ./task_file`, если pytest не установлен;
 - если Dockerfile основан на другом image, добавляет multi-stage `verifier_python` на `python:3.12-slim-bookworm` и копирует `/usr/local` в final image до `COPY ./task_file`.
 
+Перед записью `environment/Dockerfile` `_write_files()` повторно применяет `_ensure_verifier_deps()`. Это write-time guard: даже если отдельный путь генерации вернул Dockerfile без verifier Python/pytest, на диск сохраняется уже пропатченный Dockerfile.
+
 Это нужно, чтобы `/tests/test.sh` не скачивал зависимости во время проверки и всегда исполнял `test_outputs.py` новым Python.
+
+Static review Dockerfile проверяет:
+
+- есть `FROM`;
+- нет пустого `apt-get install -y && ...`;
+- нет `astral.sh/uv` и `uvx`;
+- есть Python 3.12+ и `pytest` для verifier после `_ensure_verifier_deps()`;
+- `COPY` не ссылается на несуществующие build-context paths;
+- generated environment artifacts копируются в image.
 
 ## Запись Файлов
 
@@ -431,6 +448,58 @@ docker build -t tl-validate-<task> -f environment/Dockerfile environment/
 ```text
 validated/validation_report.json
 validated/validate_tasks.log
+```
+
+## Validation-First Flow
+
+Для большого generated set текущая рабочая схема состоит из трех этапов:
+
+```text
+1. validate all current candidates
+2. keep tasks where reference solution passes verifier
+3. regenerate Dockerfile only for failed tasks with complete artifacts
+4. validate regenerated failed tasks
+5. merge accepted baseline + accepted regenerated tasks
+```
+
+Сначала запускается baseline validation текущих candidates:
+
+```bash
+python validator/validate_tasks.py \
+  --input ./candidates \
+  --output ./validation/baseline_current_dockerfiles \
+  --workers 8 \
+  --timeout 300
+```
+
+Затем failed tasks собираются в отдельный JSONL:
+
+```bash
+python scripts/validation_first_pipeline.py collect-failures \
+  --validation-report ./validation/baseline_current_dockerfiles/validation_report.json \
+  --tasks-dir ./candidates \
+  --output ./validation/failed_tasks.jsonl
+```
+
+`failed_tasks.jsonl` содержит `task`, baseline status/reward/error и `regen_eligible`. Dockerfile regeneration запускается только по `regen_eligible` задачам:
+
+```bash
+python scripts/regenerate_dockerfiles.py \
+  --tasks-dir ./candidates \
+  --task-list ./validation/failed_tasks.jsonl \
+  --report-dir ./validation/dockerfile_regen \
+  --workers 8
+```
+
+`scripts/regenerate_dockerfiles.py` использует тот же strict Dockerfile review, что и `TaskGenerator`. Если новая генерация не проходит review или API падает, старый Dockerfile сохраняется, а строка получает status `kept_old`; скрипт не пишет сомнительный fallback поверх старого файла.
+
+После повторной validation regenerated failed tasks accepted задачи объединяются:
+
+```bash
+python scripts/validation_first_pipeline.py merge-accepted \
+  --baseline-validated-dir ./validation/baseline_current_dockerfiles \
+  --regenerated-validated-dir ./validation/regenerated_dockerfiles \
+  --output-dir ./validation/final_accepted
 ```
 
 ## Важные Ограничения Текущей Реализации
