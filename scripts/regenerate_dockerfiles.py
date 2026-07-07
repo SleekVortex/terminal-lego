@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import re
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -16,21 +15,17 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
-REPO_DIR = Path(__file__).resolve().parents[1]
-if str(REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(REPO_DIR))
-
-from generator import llm_client  # noqa: E402
-from generator.contracts import SOQuestion  # noqa: E402
-from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker  # noqa: E402
-from generator.orchestrator import DOCKERFILE_MAX_ATTEMPTS, TaskGenerator  # noqa: E402
-from generator.prompt_loader import DOCKERFILE_PROMPT_TEMPLATE, SYSTEM_PROMPT  # noqa: E402
-from generator.reviewers.dockerfile_review import (  # noqa: E402
+from generator import llm_client
+from generator.contracts import SOQuestion
+from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker
+from generator.orchestrator import DOCKERFILE_MAX_ATTEMPTS, TaskGenerator
+from generator.prompt_loader import DOCKERFILE_PROMPT_TEMPLATE, SYSTEM_PROMPT
+from generator.reviewers.dockerfile_review import (
     ensure_verifier_deps,
     extract_dockerfile_from_response,
     review_dockerfile,
 )
-from generator.task_writer import format_env_file_list  # noqa: E402
+from generator.task_writer import format_env_file_list
 
 
 def parse_task_index(task_name: str) -> Optional[int]:

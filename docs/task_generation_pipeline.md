@@ -489,7 +489,7 @@ python scripts/validation_first_pipeline.py collect-failures \
 `failed_tasks.jsonl` содержит `task`, baseline status/reward/error и `regen_eligible`. Dockerfile regeneration запускается только по `regen_eligible` задачам:
 
 ```bash
-python scripts/regenerate_dockerfiles.py \
+python -m scripts.regenerate_dockerfiles \
   --tasks-dir ./candidates \
   --task-list ./validation/failed_tasks.jsonl \
   --report-dir ./validation/dockerfile_regen \

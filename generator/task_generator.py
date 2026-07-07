@@ -7,15 +7,10 @@ import argparse
 import json
 import logging
 import os
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-
-REPO_DIR = Path(__file__).resolve().parents[1]
-if str(REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(REPO_DIR))
 
 from generator.contracts import SOQuestion
 from generator.llm_client import (
@@ -97,7 +92,7 @@ def main() -> None:
 
     if not _config["api_key"]:
         logger.error("No API key provided. Use --api-key or set OPENAI_API_KEY env var.")
-        sys.exit(1)
+        raise SystemExit(1)
 
     logger.info("Model: %s", _config["model"])
     logger.info("API base: %s", _config["api_base"])

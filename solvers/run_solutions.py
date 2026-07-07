@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate agent solution rollouts for Terminal-Lego tasks using Harbor.
+"""Run solver agents for Terminal-Lego tasks using Harbor.
 
 This module intentionally delegates harness-specific execution to Harbor. The
 same CLI can run Terminus, mini-swe-agent, OpenHands, Codex, SWE-Agent, and any
@@ -13,18 +13,13 @@ import asyncio
 import json
 import math
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-PREINSTALLED_OPENCODE_AGENT = "preinstalled-opencode"
-PREINSTALLED_OPENCODE_IMPORT_PATH = (
-    "rollouts.agents.preinstalled_opencode:PreinstalledOpenCode"
+from solvers.settings import (
+    PREINSTALLED_OPENCODE_AGENT,
+    import_path_for_agent,
 )
 
 
@@ -143,7 +138,7 @@ def build_agent_config(args: argparse.Namespace, AgentConfig, model_name: Option
     }
     if args.agent == PREINSTALLED_OPENCODE_AGENT:
         return AgentConfig(
-            import_path=PREINSTALLED_OPENCODE_IMPORT_PATH,
+            import_path=import_path_for_agent(args.agent),
             **kwargs,
         )
     return AgentConfig(
@@ -379,7 +374,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--jobs-dir", type=Path, default=Path("jobs"))
     parser.add_argument(
         "--job-name",
-        default=f"solution-rollouts-{time.strftime('%Y%m%dT%H%M%S')}",
+        default=f"solution-runs-{time.strftime('%Y%m%dT%H%M%S')}",
     )
     parser.add_argument("--agent", default=os.environ.get("AGENT", "terminus-2"))
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"))
@@ -443,4 +438,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

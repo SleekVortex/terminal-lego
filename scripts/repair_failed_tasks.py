@@ -6,18 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 
 
-REPO_DIR = Path(__file__).resolve().parents[1]
-if str(REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(REPO_DIR))
-
-from generator import llm_client  # noqa: E402
-from generator.failure.classifier import classify_from_validation_report  # noqa: E402
-from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker  # noqa: E402
-from generator.repair.loop import load_diagnoses, run_repair_loop  # noqa: E402
+from generator import llm_client
+from generator.failure.classifier import classify_from_validation_report
+from generator.llm_client import DEFAULT_API_BASE, DEFAULT_MODEL, TokenTracker
+from generator.repair.loop import load_diagnoses, run_repair_loop
 
 
 def main() -> None:

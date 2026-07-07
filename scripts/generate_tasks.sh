@@ -23,7 +23,7 @@ Environment:
   OPENAI_API_BASE        OpenAI-compatible API base.
   OPENAI_API_KEY         API key. Default: EMPTY
 
-Any extra CLI arguments are passed to generator/task_generator.py.
+Any extra CLI arguments are passed to python -m generator.task_generator.
 USAGE
 }
 
@@ -43,6 +43,16 @@ shift 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+make_abs_path() {
+  case "$1" in
+    /*) printf "%s\n" "$1" ;;
+    *) printf "%s\n" "$(pwd)/$1" ;;
+  esac
+}
+
+INPUT_JSONL="$(make_abs_path "$INPUT_JSONL")"
+OUTPUT_DIR="$(make_abs_path "$OUTPUT_DIR")"
 
 SEED_JSON="${SEED_JSON:-${OUTPUT_DIR}/seed.json}"
 CANDIDATES_DIR="${CANDIDATES_DIR:-${OUTPUT_DIR}/candidates}"
@@ -104,7 +114,8 @@ if [[ "${RESUME:-0}" == "1" ]]; then
   generator_args+=(--resume)
 fi
 
-python "${REPO_DIR}/generator/task_generator.py" "${generator_args[@]}" "$@"
+cd "$REPO_DIR"
+python -m generator.task_generator "${generator_args[@]}" "$@"
 
 echo "Seed: ${SEED_JSON}"
 echo "Candidates: ${CANDIDATES_DIR}"

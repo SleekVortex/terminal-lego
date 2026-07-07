@@ -1,11 +1,11 @@
 # Solution Generation Pipeline
 
-Документ описывает текущую реализацию генерации agent rollouts / решений для уже готовых Terminal-Lego задач.
+Документ описывает текущую реализацию запуска solver agents и генерации решений для уже готовых Terminal-Lego задач.
 
 ## Основные Файлы
 
 - `scripts/generate_solutions.sh` - convenience wrapper для запуска solution generation.
-- `rollouts/solution_generator.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
+- `solvers/run_solutions.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
 - `prompts/solution_generator/materialize_solution.md` - extra instruction для агента: материализовать итоговое решение в `/logs/artifacts/solve.sh`.
 - `configs/harbor/docker-compose-bridge-network.yaml` - опциональный Harbor compose override для `network_mode: bridge`.
 - `configs/opencode/` - preinstalled OpenCode runtime config для запуска OpenCode без скачивания nvm/npm внутри каждого trial.
@@ -15,7 +15,7 @@
 ```text
 validated Terminal-Lego tasks
   -> scripts/generate_solutions.sh
-  -> rollouts/solution_generator.py
+  -> solvers/run_solutions.py
   -> Harbor Job
   -> agent runs task in Docker environment
   -> verifier runs tests
@@ -37,7 +37,7 @@ validated/
     tests/test_outputs.py
 ```
 
-`solution/solve.sh` в задаче может существовать как reference solution, но agent rollout не должен читать reference solution. Для agent solution используется отдельный materialized artifact:
+`solution/solve.sh` в задаче может существовать как reference solution, но solver agent не должен читать reference solution. Для agent solution используется отдельный materialized artifact:
 
 ```text
 <trial>/artifacts/logs/artifacts/solve.sh
@@ -67,7 +67,7 @@ scripts/generate_solutions.sh TASKS_DIR [JOBS_DIR] [extra solution_generator arg
 - `HARBOR_ENV=docker`;
 - `PYTHON_BIN=python3`;
 - `OPENAI_API_KEY=EMPTY`;
-- `JOB_NAME=solution-rollouts-<utc timestamp>`;
+- `JOB_NAME=solution-runs-<utc timestamp>`;
 - `N_ATTEMPTS=1`;
 - `N_CONCURRENT=1`;
 - `MAX_RETRIES=0`;
@@ -79,14 +79,14 @@ scripts/generate_solutions.sh TASKS_DIR [JOBS_DIR] [extra solution_generator arg
 Wrapper собирает аргументы и вызывает:
 
 ```bash
-python rollouts/solution_generator.py ...
+python -m solvers.run_solutions ...
 ```
 
-Все extra CLI args после `TASKS_DIR [JOBS_DIR]` пробрасываются в `solution_generator.py`.
+Все extra CLI args после `TASKS_DIR [JOBS_DIR]` пробрасываются в `run_solutions.py`.
 
 ## Preinstalled OpenCode
 
-Обычный Harbor agent `opencode` устанавливает nvm, Node и `opencode-ai` внутри каждого task container. Для массовых rollouts это слишком медленно и зависит от GitHub/npm во время каждого trial.
+Обычный Harbor agent `opencode` устанавливает nvm, Node и `opencode-ai` внутри каждого task container. Для массовых solver runs это слишком медленно и зависит от GitHub/npm во время каждого trial.
 
 Для этого добавлен agent mode:
 
@@ -162,7 +162,7 @@ Trajectory для `preinstalled-opencode` дополняется первым st
 }
 ```
 
-Этот system step содержит тот же текст, который записывается в OpenCode config как `agent.build.prompt`. После него идет `source=user` с task instruction, затем `source=agent` шаги из OpenCode stream. Это нужно, чтобы rollout был самодостаточным для просмотра и последующего train-data conversion.
+Этот system step содержит тот же текст, который записывается в OpenCode config как `agent.build.prompt`. После него идет `source=user` с task instruction, затем `source=agent` шаги из OpenCode stream. Это нужно, чтобы agent run был самодостаточным для просмотра и последующего train-data conversion.
 
 ## Materialize Solution Prompt
 
@@ -183,11 +183,11 @@ Trajectory для `preinstalled-opencode` дополняется первым st
 - script должен завершаться non-zero on failure;
 - после записи надо выполнить `chmod +x /logs/artifacts/solve.sh`.
 
-Именно наличие этого файла используется при классификации accepted rollouts.
+Именно наличие этого файла используется при классификации accepted agent runs.
 
 ## Harbor Integration
 
-`rollouts/solution_generator.py` импортирует Harbor runtime:
+`solvers/run_solutions.py` импортирует Harbor runtime:
 
 ```python
 from harbor.job import Job
@@ -290,7 +290,7 @@ Wrapper всегда добавляет:
 Для `preinstalled-opencode` вместо `AgentConfig.name` используется Harbor `AgentConfig.import_path`:
 
 ```text
-rollouts.agents.preinstalled_opencode:PreinstalledOpenCode
+solvers.agents.preinstalled_opencode:PreinstalledOpenCode
 ```
 
 Это позволяет не patch-ить Harbor package и при этом переиспользовать его OpenCode run/trajectory implementation.
@@ -362,7 +362,7 @@ MAX_RETRIES=0
 `--dry-run-config PATH` не запускает Harbor job. Вместо этого пишет serialized Harbor config:
 
 ```bash
-python rollouts/solution_generator.py \
+python -m solvers.run_solutions \
   --tasks-dir ./validated \
   --dry-run-config ./job_config.json
 ```
@@ -492,7 +492,7 @@ exception_type == AgentTimeoutError
 - полный список trial rows;
 - пути к summary/accepted/failed файлам.
 
-`accepted_trajectories.jsonl` содержит только accepted rows. Это основной файл для дальнейшего использования agent rollouts.
+`accepted_trajectories.jsonl` содержит только accepted rows. Это основной файл для дальнейшего использования agent runs.
 
 Каждая строка включает:
 
@@ -535,7 +535,7 @@ solution/solve.sh
 
 ## Важные Ограничения Текущей Реализации
 
-- `solution_generator.py` не реализует harness logic сам; он делегирует запуск Harbor.
+- `run_solutions.py` не реализует harness logic сам; он делегирует запуск Harbor.
 - Качество и формат trajectory зависят от выбранного Harbor agent.
 - Multi-harness поддержка ограничена тем, какие agents/environments реально поддерживает установленный Harbor.
 - Accepted classification требует не только reward, но и materialized `/logs/artifacts/solve.sh`.

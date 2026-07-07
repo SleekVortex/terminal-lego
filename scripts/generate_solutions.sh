@@ -20,7 +20,7 @@ Environment:
                           for this job on exit. Default: 1
   OPENAI_API_BASE         OpenAI-compatible API base.
   OPENAI_API_KEY          API key. Default: EMPTY
-  JOB_NAME                Harbor job name. Default: solution-rollouts-<timestamp>
+  JOB_NAME                Harbor job name. Default: solution-runs-<timestamp>
   N_ATTEMPTS              Attempts per task. Default: 1
   N_CONCURRENT            Concurrent trials. Default: 1
   MAX_RETRIES             Harbor retry count. Default: 0
@@ -56,8 +56,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MATERIALIZE_INSTRUCTION="${MATERIALIZE_INSTRUCTION:-${REPO_DIR}/prompts/solution_generator/materialize_solution.md}"
 
+make_abs_path() {
+  case "$1" in
+    /*) printf "%s\n" "$1" ;;
+    *) printf "%s\n" "$(pwd)/$1" ;;
+  esac
+}
+
+TASKS_DIR="$(make_abs_path "$TASKS_DIR")"
+JOBS_DIR="$(make_abs_path "$JOBS_DIR")"
+
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
-JOB_NAME="${JOB_NAME:-solution-rollouts-$(date -u +%Y%m%dT%H%M%SZ)}"
+JOB_NAME="${JOB_NAME:-solution-runs-$(date -u +%Y%m%dT%H%M%SZ)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 DOCKER_NETWORK_STRATEGY="${DOCKER_NETWORK_STRATEGY:-bridge}"
 CLEANUP_DOCKER="${CLEANUP_DOCKER:-1}"
@@ -192,4 +202,5 @@ if [[ -n "${MATERIALIZE_INSTRUCTION:-}" ]]; then
   args+=(--extra-instruction-path "${MATERIALIZE_INSTRUCTION}")
 fi
 
-"${PYTHON_BIN}" "${REPO_DIR}/rollouts/solution_generator.py" "${args[@]}" "$@"
+cd "$REPO_DIR"
+"${PYTHON_BIN}" -m solvers.run_solutions "${args[@]}" "$@"

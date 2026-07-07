@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from rollouts import solution_generator as sg
-from rollouts.agents.preinstalled_opencode import (
+from solvers import run_solutions as sg
+from solvers import settings as solver_settings
+from solvers.agents.preinstalled_opencode import (
     OPENCODE_SYSTEM_PROMPT,
     PreinstalledOpenCode,
 )
@@ -164,7 +165,9 @@ def test_build_job_config_uses_import_path_for_preinstalled_opencode(
     agent = config.agents[0]
 
     assert agent.name is None
-    assert agent.import_path == sg.PREINSTALLED_OPENCODE_IMPORT_PATH
+    assert agent.import_path == solver_settings.import_path_for_agent(
+        solver_settings.PREINSTALLED_OPENCODE_AGENT
+    )
     assert agent.model_name == "openai/glm"
     assert agent.kwargs["api_base"] == "http://host.docker.internal:30003/v1"
     assert agent.kwargs["api_key"] == "EMPTY"

@@ -204,8 +204,9 @@ generator/
     loop.py
     agent.py
 
-rollouts/
-  solution_generator.py
+solvers/
+  run_solutions.py
+  settings.py
   agents/
     __init__.py
     preinstalled_opencode.py
@@ -591,7 +592,7 @@ python scripts/validation_first_pipeline.py collect-failures \
 ### Repair
 
 ```bash
-python scripts/repair_failed_tasks.py \
+python -m scripts.repair_failed_tasks \
   --tasks-dir candidates \
   --failed-tasks validation/failed_tasks.jsonl \
   --validation-log-dir validation/baseline/validation_logs \

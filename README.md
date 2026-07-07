@@ -106,11 +106,11 @@ scripts/generate_solutions.sh \
     ./data/solution_runs
 ```
 
-`rollouts/solution_generator.py` uses Harbor directly, so the same interface can
+`solvers/run_solutions.py` uses Harbor directly, so the same interface can
 run other Harbor agents and environments:
 
 ```bash
-python rollouts/solution_generator.py \
+python -m solvers.run_solutions \
     --tasks-dir ./data/validated_r1 \
     --jobs-dir ./data/solution_runs \
     --agent mini-swe-agent \
