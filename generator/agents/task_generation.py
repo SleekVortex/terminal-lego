@@ -22,13 +22,12 @@ from generator.reviewers.dockerfile_review import (
 )
 from generator.reviewers.solution_review import review_solution_shell
 from generator.reviewers.test_review import STATIC_TEST_SH, parse_test_outputs_py, review_tests
+from generator.settings import DOCKERFILE_MAX_ATTEMPTS, TEST_MAX_ATTEMPTS
 from generator.task_writer import format_env_file_list
 from generator.text_utils import clean_html
 
 
 logger = logging.getLogger(__name__)
-DOCKERFILE_MAX_ATTEMPTS = 3
-TEST_MAX_ATTEMPTS = 3
 
 
 def extract_fenced(response: str, language: str) -> Optional[str]:
