@@ -7,18 +7,12 @@ import argparse
 import json
 import logging
 import shutil
-import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import threading
 
-
-REPO_DIR = Path(__file__).resolve().parents[1]
-if str(REPO_DIR) not in sys.path:
-    sys.path.insert(0, str(REPO_DIR))
-
-from validator.docker_runner import DockerRunner, docker_safe_name
+from validator.docker_runner import DockerRunner
 from validator.validation_logs import TaskLogWriter
 
 

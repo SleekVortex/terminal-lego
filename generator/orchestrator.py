@@ -8,7 +8,6 @@ from typing import Any, Optional
 
 from generator.agents.base import LLMCall
 from generator.agents.task_generation import (
-    DOCKERFILE_MAX_ATTEMPTS,
     DockerfileAgent,
     EnvironmentAgent,
     InstructionAgent,

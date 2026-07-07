@@ -4,7 +4,7 @@ import json
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 from generator.agents.base import LLMCall
 from generator.contracts import FailureDiagnosis, RepairAttempt

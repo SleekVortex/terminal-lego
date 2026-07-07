@@ -424,7 +424,7 @@ api_token_usage.json
 Валидация не входит в `scripts/generate_tasks.sh`; она запускается отдельно через:
 
 ```bash
-python validator/validate_tasks.py \
+python -m validator.validate_tasks \
   --input ./candidates \
   --output ./validated \
   --workers 8 \
@@ -470,7 +470,7 @@ validated/validate_tasks.log
 Сначала запускается baseline validation текущих candidates:
 
 ```bash
-python validator/validate_tasks.py \
+python -m validator.validate_tasks \
   --input ./candidates \
   --output ./validation/baseline_current_dockerfiles \
   --workers 8 \

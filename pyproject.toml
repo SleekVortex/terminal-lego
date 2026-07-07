@@ -1,0 +1,15 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+    ".venv",
+    "terminal-lego-work",
+]
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+]

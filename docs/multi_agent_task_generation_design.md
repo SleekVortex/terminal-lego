@@ -570,7 +570,7 @@ Resume semantics:
 ### Validate
 
 ```bash
-python validator/validate_tasks.py \
+python -m validator.validate_tasks \
   --input candidates \
   --output validation/baseline \
   --workers 64 \

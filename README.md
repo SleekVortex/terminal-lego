@@ -23,7 +23,13 @@
 pip install -r requirements.txt
 ```
 
-### 1.2 Configure
+### 1.2 Lint
+
+```bash
+scripts/lint.sh
+```
+
+### 1.3 Configure
 
 ```bash
 cp .env.example .env
@@ -85,7 +91,7 @@ scripts/generate_tasks.sh \
 Validation requires Docker.
 
 ```bash
-python validator/validate_tasks.py \
+python -m validator.validate_tasks \
     --input ./data/candidates_r1 \
     --output ./data/validated_r1 \
     --workers 8 \
