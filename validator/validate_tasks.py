@@ -51,9 +51,10 @@ error_count = AtomicCounter()
 
 
 class TaskValidator:
-    def __init__(self, output_dir: Path, timeout: int):
+    def __init__(self, output_dir: Path, timeout: int, emit_progress: bool = True):
         self.output_dir = output_dir
         self.timeout = timeout
+        self.emit_progress = emit_progress
 
     def validate(self, task_dir: Path, total: int) -> dict:
         task_name = task_dir.name
@@ -166,9 +167,10 @@ class TaskValidator:
                 runner.cleanup()
             except Exception:
                 pass
-            current = progress.increment()
-            if current % 10 == 0 or current == total:
-                logger.info("Progress: %s/%s | passed=%s failed=%s", current, total, passed.value, failed.value)
+            if self.emit_progress:
+                current = progress.increment()
+                if current % 10 == 0 or current == total:
+                    logger.info("Progress: %s/%s | passed=%s failed=%s", current, total, passed.value, failed.value)
 
 
 def validate_task(task_dir: Path, output_dir: Path, timeout: int, total: int) -> dict:

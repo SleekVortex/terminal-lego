@@ -13,3 +13,13 @@ select = [
     "E9",
     "F",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    ".pytest_cache",
+    ".ruff_cache",
+    "terminal-lego-work",
+]

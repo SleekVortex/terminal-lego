@@ -47,7 +47,12 @@ def classify_failure(task_name: str, log_dir: Path) -> FailureDiagnosis:
             allowed_repairs=["solution/solve.sh", "environment"],
         )
 
-    if re.search(r"command not found|/usr/share/dotnet|Cannot find module|ModuleNotFoundError", combined, re.I):
+    if re.search(
+        r"command not found|/usr/share/dotnet|Cannot find module|ModuleNotFoundError|"
+        r"no Python 3\.12\+ with pytest|pytest is not installed",
+        combined,
+        re.I,
+    ):
         return FailureDiagnosis(
             task_name,
             "runtime_missing",

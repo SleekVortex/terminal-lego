@@ -31,3 +31,14 @@ def test_classify_solution_path_mismatch(tmp_path: Path) -> None:
 
     assert diagnosis.failure_class == "path_mismatch"
     assert "solution/solve.sh" in diagnosis.allowed_repairs
+
+
+def test_classify_missing_verifier_python_as_runtime_missing(tmp_path: Path) -> None:
+    log_dir = tmp_path / "validation_logs" / "task_00003"
+    write_log(log_dir, "result.json", json.dumps({"status": "failed"}))
+    write_log(log_dir, "test.stdout", "Error: no Python 3.12+ with pytest is installed.")
+
+    diagnosis = classify_failure("task_00003", log_dir)
+
+    assert diagnosis.failure_class == "runtime_missing"
+    assert diagnosis.allowed_repairs == ["environment/Dockerfile"]
