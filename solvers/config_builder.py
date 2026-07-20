@@ -10,7 +10,7 @@ from typing import Any
 
 from solvers.harbor_runner import import_harbor
 from solvers.parsing import parse_env, parse_key_value
-from solvers.settings import PREINSTALLED_OPENCODE_AGENT, import_path_for_agent
+from solvers.settings import SOLVER_AGENT_IMPORTS, import_path_for_agent
 
 
 def is_single_task_dir(path: Path) -> bool:
@@ -52,7 +52,7 @@ def build_agent_config(args: argparse.Namespace, AgentConfig, model_name: str | 
         "include_logs": args.agent_include_logs or [],
         "exclude_logs": args.agent_exclude_logs or [],
     }
-    if args.agent == PREINSTALLED_OPENCODE_AGENT:
+    if args.agent in SOLVER_AGENT_IMPORTS:
         return AgentConfig(
             import_path=import_path_for_agent(args.agent),
             **kwargs,

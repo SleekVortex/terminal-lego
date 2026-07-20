@@ -11,11 +11,13 @@ from generator.agents.task_generation import (
     DockerfileAgent,
     EnvironmentAgent,
     InstructionAgent,
+    InstructionRewriteAgent,
     SolutionAgent,
     TestAgent,
 )
 from generator.contracts import EnvironmentSpec, SOQuestion
-from generator.llm_client import call_llm_api
+from generator.instruction_style import select_instruction_style
+from generator.llm_client import call_llm_api, record_trace_event
 from generator.reviewers.test_review import review_tests
 from generator.task_writer import TaskWriter, format_env_file_list, generate_task_toml
 from generator.text_utils import assess_difficulty
@@ -31,6 +33,8 @@ class TaskGenerator:
         output_dir: Path,
         index: int | None = None,
         llm_call: LLMCall = call_llm_api,
+        instruction_rewrite_mode: str = "off",
+        lossy_instruction_ratio: float = 0.25,
     ):
         self.question = question
         self.output_dir = output_dir
@@ -41,6 +45,12 @@ class TaskGenerator:
             self.task_name = self._generate_task_name()
         self.task_dir = output_dir / self.task_name
         self.guid = hashlib.md5(f"{question.question_id}".encode()).hexdigest()[:8]
+        self.requested_instruction_rewrite_mode = instruction_rewrite_mode
+        self.instruction_rewrite_mode = select_instruction_style(
+            instruction_rewrite_mode,
+            question.question_id,
+            lossy_instruction_ratio,
+        )
 
     def _generate_task_name(self) -> str:
         title = self.question.title.lower()
@@ -76,13 +86,23 @@ class TaskGenerator:
                 logger.error("[%s] Failed to generate valid Dockerfile", self.task_name)
                 return False
 
+            final_instruction = self._rewrite_instruction(instruction)
+            if not final_instruction:
+                logger.error(
+                    "[%s] Failed to rewrite final instruction in %s mode",
+                    self.task_name,
+                    self.instruction_rewrite_mode,
+                )
+                return False
+
             TaskWriter(self.task_dir, self.question).write(
-                instruction,
+                final_instruction,
                 environment,
                 test_data.get("test_outputs_py", ""),
                 solution,
                 dockerfile,
                 difficulty,
+                self.instruction_rewrite_mode,
             )
             logger.info("[%s] Written to: %s", self.task_name, self.task_dir)
             return True
@@ -92,6 +112,32 @@ class TaskGenerator:
 
     def _generate_instruction(self) -> Optional[str]:
         return InstructionAgent(self.llm_call, self.task_name).run(self.question)
+
+    def _rewrite_instruction(self, instruction: str) -> Optional[str]:
+        if self.instruction_rewrite_mode == "off":
+            record_trace_event(
+                self.task_name,
+                "instruction_rewrite_skipped",
+                mode="off",
+                original_word_count=len(instruction.split()),
+            )
+            return instruction
+
+        rewritten = InstructionRewriteAgent(
+            self.llm_call,
+            self.task_name,
+            self.instruction_rewrite_mode,
+        ).run(instruction)
+        if rewritten:
+            record_trace_event(
+                self.task_name,
+                "instruction_rewrite_applied",
+                requested_mode=self.requested_instruction_rewrite_mode,
+                selected_mode=self.instruction_rewrite_mode,
+                original_word_count=len(instruction.split()),
+                rewritten_word_count=len(rewritten.split()),
+            )
+        return rewritten
 
     def _generate_environment(self, instruction: str) -> dict[str, Any]:
         return EnvironmentAgent(self.llm_call, self.task_name).run(self.question, instruction)
@@ -129,7 +175,11 @@ class TaskGenerator:
         return assess_difficulty(self.question.body, self.question.accepted_answer_body)
 
     def _generate_task_toml(self, difficulty: str = "medium") -> str:
-        return generate_task_toml(self.question, difficulty)
+        return generate_task_toml(
+            self.question,
+            difficulty,
+            self.instruction_rewrite_mode,
+        )
 
     def _write_files(
         self,
@@ -147,4 +197,5 @@ class TaskGenerator:
             solution,
             dockerfile,
             difficulty,
+            self.instruction_rewrite_mode,
         )

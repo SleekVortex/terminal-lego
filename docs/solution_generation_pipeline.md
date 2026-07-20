@@ -164,6 +164,60 @@ Trajectory для `preinstalled-opencode` дополняется первым st
 
 Этот system step содержит тот же текст, который записывается в OpenCode config как `agent.build.prompt`. После него идет `source=user` с task instruction, затем `source=agent` шаги из OpenCode stream. Это нужно, чтобы agent run был самодостаточным для просмотра и последующего train-data conversion.
 
+## DeepAgent
+
+Для Deep Agents Code добавлен короткий agent mode:
+
+```bash
+AGENT=deepagent
+```
+
+Он использует официальный способ интеграции Deep Agents с Harbor: Harbor agent
+`langgraph` запускает локальный LangGraph project из
+`solvers/agents/deepagent_project/`. Адаптер `solvers.agents.deepagent:DeepAgent`
+задает project/graph по умолчанию и преобразует итоговые LangGraph messages в
+`agent/trajectory.json` формата ATIF. Полный необработанный результат остается в
+`agent/deepagent-result.json`, а стандартный `langgraph-run.log` сохраняет лог
+исполнения.
+
+Для OpenAI-compatible моделей адаптер также сохраняет нестандартное поле ответа
+`reasoning_content`. LangChain по умолчанию отбрасывает его, поэтому LangGraph
+project записывает `agent/deepagent-reasoning.json`, после чего host adapter
+добавляет reasoning в `Step.reasoning_content` ATIF-траектории. Число reasoning
+tokens сохраняется в `step.metrics.extra.reasoning_tokens`, а сумма - в
+`final_metrics.extra.total_reasoning_tokens`.
+
+Пример для локального OpenAI-compatible GLM endpoint, доступного из task
+container:
+
+```bash
+AGENT=deepagent \
+MODEL_NAME=openai/glm-5.2-fp8 \
+OPENAI_API_BASE=http://host.docker.internal:30301/v1 \
+OPENAI_API_KEY=EMPTY \
+PYTHON_BIN=.venv/bin/python \
+DOCKER_NETWORK_STRATEGY=bridge \
+scripts/generate_solutions.sh ./validated ./runs \
+  --agent-kwarg 'model_kwargs={"timeout":1800}'
+```
+
+Если задан `OPENAI_API_BASE`, адаптер передает его как LangChain `base_url` и
+принудительно использует `/v1/chat/completions` (`use_responses_api=false`).
+Остальные параметры модели можно передавать JSON-объектом в
+`model_kwargs`. Рабочая директория по умолчанию - `/app`.
+
+LangGraph project фиксирует `deepagents-code==0.1.43` и требуемый им prerelease
+`deepagents==0.7.0a7`. Prerelease wheel задан прямой PyPI-ссылкой с SHA-256,
+потому что Harbor запускает `uv` с политикой `--prerelease=if-necessary`, которая
+не разрешает этот транзитивный prerelease. Harbor создает Python venv и
+устанавливает зависимости внутри task container, поэтому первый запуск
+медленнее обычного вызова уже встроенного агента и требует доступа к PyPI из
+контейнера.
+
+System prompt отдельно запрещает чтение `/tests`, `/solution`, verifier/reward
+files и требует создать executable `/logs/artifacts/solve.sh`. Общий
+`materialize_solution.md` по-прежнему добавляется wrapper-ом к инструкции.
+
 ## Materialize Solution Prompt
 
 `prompts/solution_generator/materialize_solution.md` добавляется в Harbor job как `extra_instruction_path`.

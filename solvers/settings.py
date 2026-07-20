@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 
 PREINSTALLED_OPENCODE_AGENT = "preinstalled-opencode"
+DEEPAGENT_AGENT = "deepagent"
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,10 @@ class AgentImportTarget:
 
 
 SOLVER_AGENT_IMPORTS = {
+    DEEPAGENT_AGENT: AgentImportTarget(
+        module="solvers.agents.deepagent",
+        class_name="DeepAgent",
+    ),
     PREINSTALLED_OPENCODE_AGENT: AgentImportTarget(
         module="solvers.agents.preinstalled_opencode",
         class_name="PreinstalledOpenCode",

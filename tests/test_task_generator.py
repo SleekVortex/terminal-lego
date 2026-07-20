@@ -11,12 +11,25 @@ import pytest
 from generator import llm_client
 from generator import task_generator as cli
 from generator.contracts import SOQuestion
+from generator.agents.task_generation import (
+    InstructionRewriteAgent,
+    extract_absolute_paths,
+)
+from generator.instruction_style import (
+    select_instruction_style,
+    validate_lossy_ratio,
+)
 from generator.llm_client import TokenTracker, call_llm_api, is_truncated
+from generator.tracing import GenerationTraceWriter, TRACE_SCHEMA_VERSION
 from generator.task_builder import TaskGenerator
 from generator.prompt_loader import (
     DOCKERFILE_PROMPT_TEMPLATE,
     ENVIRONMENT_PROMPT_TEMPLATE,
     INSTRUCTION_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_CONCISE_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_CONCISE_SYSTEM_PROMPT,
+    INSTRUCTION_REWRITE_LOSSY_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_LOSSY_SYSTEM_PROMPT,
     PROMPT_TEMPLATE_DIR,
     SOLUTION_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
@@ -80,7 +93,10 @@ def test_truncation_detection_for_json_and_fenced_blocks() -> None:
     assert not is_truncated('```json\n{"x": 1}\n```')
 
 
-def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_call_llm_api_omits_optional_generation_params_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     payloads = []
 
     class DummyTracker:
@@ -96,7 +112,16 @@ def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: p
 
         def json(self) -> dict:
             return {
-                "choices": [{"message": {"content": "ok"}}],
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                            "reasoning_content": "reason",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1},
             }
 
@@ -110,14 +135,44 @@ def test_call_llm_api_omits_optional_generation_params_by_default(monkeypatch: p
     monkeypatch.setitem(llm_client._config, "api_key", "EMPTY")
     monkeypatch.setitem(llm_client._config, "model", "test-model")
     monkeypatch.setattr(llm_client.requests, "post", fake_post)
+    trace_dir = tmp_path / "traces"
+    llm_client.configure_trace_writer(str(trace_dir))
 
-    assert call_llm_api("prompt") == "ok"
+    assert call_llm_api("prompt", system_prompt="system", task_name="task_00001", stage="instruction") == "ok"
     assert "max_tokens" not in payloads[-1]
     assert "temperature" not in payloads[-1]
 
     assert call_llm_api("prompt", max_tokens=123, temperature=0.4) == "ok"
     assert payloads[-1]["max_tokens"] == 123
     assert payloads[-1]["temperature"] == 0.4
+
+    rows = [json.loads(line) for line in (trace_dir / "task_00001.jsonl").read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["event"] == "llm_call"
+    assert rows[0]["stage"] == "instruction"
+    assert rows[0]["request"]["messages"] == [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "prompt"},
+    ]
+    assert rows[0]["response"]["choices"][0]["message"]["reasoning_content"] == "reason"
+    llm_client.configure_trace_writer(None)
+
+
+def test_generation_trace_writer_appends_ordered_task_events(tmp_path: Path) -> None:
+    writer = GenerationTraceWriter(tmp_path)
+    question = make_question()
+
+    writer.task_started("task_00001", question)
+    writer.record("task_00001", "llm_call", stage="instruction", request={}, response={})
+    writer.task_finished("task_00001", True)
+
+    rows = [json.loads(line) for line in (tmp_path / "task_00001.jsonl").read_text().splitlines()]
+    assert [row["sequence"] for row in rows] == [1, 2, 3]
+    assert [row["event"] for row in rows] == ["task_started", "llm_call", "task_finished"]
+    assert all(row["schema_version"] == TRACE_SCHEMA_VERSION for row in rows)
+    assert all(row["run_id"] == writer.run_id for row in rows)
+    assert rows[0]["source"]["question_id"] == 123
+    assert rows[-1]["success"] is True
 
 
 def test_task_name_generation_and_env_file_format(tmp_path: Path) -> None:
@@ -141,6 +196,10 @@ def test_prompt_templates_are_loaded_from_prompt_files() -> None:
     prompt_files = {
         "system.md": SYSTEM_PROMPT,
         "instruction.md": INSTRUCTION_PROMPT_TEMPLATE,
+        "instruction_rewrite_concise_system.md": INSTRUCTION_REWRITE_CONCISE_SYSTEM_PROMPT,
+        "instruction_rewrite_concise.md": INSTRUCTION_REWRITE_CONCISE_PROMPT_TEMPLATE,
+        "instruction_rewrite_lossy_system.md": INSTRUCTION_REWRITE_LOSSY_SYSTEM_PROMPT,
+        "instruction_rewrite_lossy.md": INSTRUCTION_REWRITE_LOSSY_PROMPT_TEMPLATE,
         "environment.md": ENVIRONMENT_PROMPT_TEMPLATE,
         "solution.md": SOLUTION_PROMPT_TEMPLATE,
         "tests.md": TEST_PROMPT_TEMPLATE,
@@ -150,6 +209,81 @@ def test_prompt_templates_are_loaded_from_prompt_files() -> None:
     assert PROMPT_TEMPLATE_DIR.name == "task_generator"
     for filename, prompt in prompt_files.items():
         assert prompt == (PROMPT_TEMPLATE_DIR / filename).read_text(encoding="utf-8").rstrip("\n")
+
+
+def test_instruction_style_selection_is_deterministic() -> None:
+    assert select_instruction_style("off", 123, 0.25) == "off"
+    assert select_instruction_style("concise", 123, 0.25) == "concise"
+    assert select_instruction_style("lossy", 123, 0.25) == "lossy"
+    assert select_instruction_style("mixed", 123, 0.0) == "concise"
+    assert select_instruction_style("mixed", 123, 1.0) == "lossy"
+    assert select_instruction_style("mixed", 123, 0.25) == select_instruction_style(
+        "mixed",
+        123,
+        0.25,
+    )
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        validate_lossy_ratio(1.1)
+    with pytest.raises(ValueError, match="instruction rewrite mode"):
+        select_instruction_style("unknown", 123, 0.25)
+
+
+def test_extract_absolute_paths_preserves_order_and_uniqueness() -> None:
+    instruction = (
+        "Read `/app/task_file/input/data.csv`, write /app/task_file/output/result.json, "
+        "then inspect /app/task_file/input/data.csv."
+    )
+
+    assert extract_absolute_paths(instruction) == [
+        "/app/task_file/input/data.csv",
+        "/app/task_file/output/result.json",
+    ]
+
+
+def test_concise_instruction_rewrite_retries_missing_paths() -> None:
+    calls = []
+    responses = iter(
+        [
+            "I have input data under /app/task_file/input/data.csv and need it converted into a useful report without changing the source file.",
+            "I have input data in /app/task_file/input/data.csv that needs conversion. Produce /app/task_file/output/result.json with the required result while preserving the source file and its values exactly.",
+        ]
+    )
+
+    def fake_call(prompt: str, *args, **kwargs) -> str:
+        calls.append((prompt, kwargs))
+        return next(responses)
+
+    rewritten = InstructionRewriteAgent(fake_call, "task_00001", "concise").run(
+        "Read /app/task_file/input/data.csv and write /app/task_file/output/result.json."
+    )
+
+    assert rewritten is not None
+    assert "/app/task_file/output/result.json" in rewritten
+    assert len(calls) == 2
+    assert calls[0][1]["stage"] == "instruction_rewrite_concise"
+    assert "missing required paths" in calls[1][0]
+
+
+def test_lossy_instruction_rewrite_allows_omitted_paths() -> None:
+    response = (
+        "I have a data conversion job that produces the wrong grouping and ordering. "
+        "Please inspect the provided files, determine the intended behavior, and fix the implementation so the generated report is consistent."
+    )
+    calls = []
+
+    def fake_call(prompt: str, *args, **kwargs) -> str:
+        calls.append((prompt, kwargs))
+        return response
+
+    rewritten = InstructionRewriteAgent(fake_call, "task_00001", "lossy").run(
+        "Read /app/task_file/input/data.csv and write /app/task_file/output/result.json."
+    )
+
+    assert rewritten == response
+    assert "/app/" not in rewritten
+    assert len(calls) == 1
+    assert calls[0][1]["stage"] == "instruction_rewrite_lossy"
 
 
 def test_dockerfile_prompt_is_runtime_first() -> None:
@@ -231,6 +365,65 @@ def test_generation_steps_parse_llm_responses(tmp_path: Path) -> None:
     assert "COPY --from=verifier_python /usr/local /usr/local" in dockerfile
 
     assert generator._assess_difficulty("instruction") == "easy"
+
+
+def test_generate_rewrites_instruction_only_after_downstream_stages(tmp_path: Path) -> None:
+    generator = TaskGenerator(
+        make_question(),
+        tmp_path,
+        index=3,
+        instruction_rewrite_mode="lossy",
+    )
+    original = "Verbose generated instruction"
+    rewritten = "I have a broken data-processing task. Inspect the provided files and fix it."
+    captured: dict[str, str] = {}
+
+    def generate_instruction() -> str:
+        return original
+
+    def rewrite_instruction(instruction: str) -> str:
+        assert instruction == original
+        captured["rewrite"] = instruction
+        return rewritten
+
+    generator._generate_instruction = generate_instruction
+    generator._rewrite_instruction = rewrite_instruction
+
+    def generate_environment(instruction: str) -> dict:
+        captured["environment"] = instruction
+        return {"files": {}, "directories": ["task_file"]}
+
+    def generate_solution(instruction: str, env_data: dict) -> str:
+        del env_data
+        captured["solution"] = instruction
+        return "#!/usr/bin/env bash\ntrue\n"
+
+    def generate_tests(instruction: str, env_data: dict, solution: str) -> dict:
+        del env_data, solution
+        captured["tests"] = instruction
+        return {"test_outputs_py": "def test_ok():\n    assert True\n"}
+
+    def generate_dockerfile(instruction: str, *args, **kwargs) -> str:
+        del args, kwargs
+        captured["dockerfile"] = instruction
+        return "FROM ubuntu:22.04\nWORKDIR /app\nCOPY ./task_file /app/task_file\n"
+
+    generator._generate_environment = generate_environment
+    generator._generate_solution = generate_solution
+    generator._generate_tests = generate_tests
+    generator._generate_dockerfile = generate_dockerfile
+
+    assert generator.generate() is True
+    assert captured == {
+        "environment": original,
+        "solution": original,
+        "tests": original,
+        "dockerfile": original,
+        "rewrite": original,
+    }
+    task_dir = tmp_path / "task_00003"
+    assert (task_dir / "instruction.md").read_text() == rewritten
+    assert 'instruction_rewrite_mode = "lossy"' in (task_dir / "task.toml").read_text()
 
 
 def test_generate_dockerfile_prompt_includes_generated_artifacts(tmp_path: Path) -> None:
@@ -517,6 +710,7 @@ def test_generate_task_toml_and_write_files(tmp_path: Path) -> None:
     assert 'category = "system-administration"' in toml_text
     assert "source_question_id = 123" in toml_text
     assert 'source_url = "https://stackoverflow.com/questions/123"' in toml_text
+    assert 'instruction_rewrite_mode = "off"' in toml_text
 
     generator._write_files(
         "# Task",

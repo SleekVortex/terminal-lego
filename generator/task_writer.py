@@ -36,7 +36,11 @@ def task_category(question: SOQuestion) -> str:
     return "general"
 
 
-def generate_task_toml(question: SOQuestion, difficulty: str = "medium") -> str:
+def generate_task_toml(
+    question: SOQuestion,
+    difficulty: str = "medium",
+    instruction_rewrite_mode: str = "off",
+) -> str:
     tags_str = ", ".join(toml_quote(tag) for tag in question.tags[:5])
     categories_str = ", ".join(toml_quote(category) for category in question.categories)
     return f'''version = "1.0"
@@ -51,6 +55,7 @@ categories = [{categories_str}]
 source_question_id = {int(question.question_id)}
 source_url = {toml_quote(question.link)}
 source_score = {question.score}
+instruction_rewrite_mode = {toml_quote(instruction_rewrite_mode)}
 
 [verifier]
 timeout_sec = 300.0
@@ -90,6 +95,7 @@ class TaskWriter:
         solution: str,
         dockerfile: str,
         difficulty: str = "medium",
+        instruction_rewrite_mode: str = "off",
     ) -> None:
         self.task_dir.mkdir(parents=True, exist_ok=True)
         (self.task_dir / "environment").mkdir(exist_ok=True)
@@ -99,7 +105,14 @@ class TaskWriter:
         dockerfile = ensure_verifier_deps(dockerfile)
 
         (self.task_dir / "instruction.md").write_text(instruction, encoding="utf-8")
-        (self.task_dir / "task.toml").write_text(generate_task_toml(self.question, difficulty), encoding="utf-8")
+        (self.task_dir / "task.toml").write_text(
+            generate_task_toml(
+                self.question,
+                difficulty,
+                instruction_rewrite_mode,
+            ),
+            encoding="utf-8",
+        )
         (self.task_dir / "environment" / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
         for dir_path in environment.directories:

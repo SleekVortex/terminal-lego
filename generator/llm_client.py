@@ -4,9 +4,12 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
+from generator.tracing import GenerationTraceWriter
 
 
 DEFAULT_API_BASE = "https://api.openai.com/v1"
@@ -128,6 +131,25 @@ _config = {
     "api_key": "",
     "model": DEFAULT_MODEL,
 }
+_trace_writer: GenerationTraceWriter | None = None
+
+
+def configure_trace_writer(output_dir: str | None) -> GenerationTraceWriter | None:
+    global _trace_writer
+    _trace_writer = GenerationTraceWriter(Path(output_dir)) if output_dir else None
+    return _trace_writer
+
+
+def get_trace_writer() -> GenerationTraceWriter | None:
+    return _trace_writer
+
+
+def record_trace_event(task_name: str | None, event: str, **data: Any) -> None:
+    if _trace_writer is not None and task_name:
+        try:
+            _trace_writer.record(task_name, event, **data)
+        except Exception as exc:
+            logger.warning("Failed to write generation trace for %s: %s", task_name, exc)
 
 
 def is_truncated(content: str) -> bool:
@@ -190,16 +212,28 @@ def call_llm_api(
             )
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", RETRY_DELAY * (attempt + 2)))
+                duration_sec = time.time() - attempt_started
                 token_tracker.record(
                     0,
                     0,
                     _config["model"],
                     task_name,
                     stage=stage,
-                    duration_sec=time.time() - attempt_started,
+                    duration_sec=duration_sec,
                     success=False,
                     attempt=attempt + 1,
                     status="rate_limited",
+                    error=f"retry_after={retry_after}",
+                )
+                record_trace_event(
+                    task_name,
+                    "llm_call",
+                    stage=stage or "unknown",
+                    attempt=attempt + 1,
+                    status="rate_limited",
+                    duration_sec=round(duration_sec, 3),
+                    request=payload,
+                    response=None,
                     error=f"retry_after={retry_after}",
                 )
                 logger.warning("Rate limited, waiting %ss...", retry_after)
@@ -212,16 +246,29 @@ def call_llm_api(
             usage = result.get("usage", {})
             truncated = check_truncation and is_truncated(content)
             retry_truncated = truncated and attempt < MAX_RETRIES - 1
+            duration_sec = time.time() - attempt_started
+            status = "truncated_retry" if retry_truncated else ("truncated_final" if truncated else "ok")
             token_tracker.record(
                 usage.get("prompt_tokens", 0),
                 usage.get("completion_tokens", 0),
                 _config["model"],
                 task_name,
                 stage=stage,
-                duration_sec=time.time() - attempt_started,
+                duration_sec=duration_sec,
                 success=not retry_truncated,
                 attempt=attempt + 1,
-                status="truncated_retry" if retry_truncated else ("truncated_final" if truncated else "ok"),
+                status=status,
+            )
+            record_trace_event(
+                task_name,
+                "llm_call",
+                stage=stage or "unknown",
+                attempt=attempt + 1,
+                status=status,
+                duration_sec=round(duration_sec, 3),
+                request=payload,
+                response=result,
+                error=None,
             )
             if retry_truncated:
                 logger.warning("Output truncated (attempt %s), retrying...", attempt + 1)
@@ -229,47 +276,84 @@ def call_llm_api(
                 continue
             return content
         except requests.exceptions.Timeout:
+            duration_sec = time.time() - attempt_started
             token_tracker.record(
                 0,
                 0,
                 _config["model"],
                 task_name,
                 stage=stage,
-                duration_sec=time.time() - attempt_started,
+                duration_sec=duration_sec,
                 success=False,
                 attempt=attempt + 1,
                 status="timeout",
+                error="request timeout",
+            )
+            record_trace_event(
+                task_name,
+                "llm_call",
+                stage=stage or "unknown",
+                attempt=attempt + 1,
+                status="timeout",
+                duration_sec=round(duration_sec, 3),
+                request=payload,
+                response=None,
                 error="request timeout",
             )
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY)
         except requests.exceptions.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
+            duration_sec = time.time() - attempt_started
+            error = f"status={status_code}: {exc}"
             token_tracker.record(
                 0,
                 0,
                 _config["model"],
                 task_name,
                 stage=stage,
-                duration_sec=time.time() - attempt_started,
+                duration_sec=duration_sec,
                 success=False,
                 attempt=attempt + 1,
                 status="http_error",
-                error=f"status={status_code}: {exc}",
+                error=error,
+            )
+            record_trace_event(
+                task_name,
+                "llm_call",
+                stage=stage or "unknown",
+                attempt=attempt + 1,
+                status="http_error",
+                duration_sec=round(duration_sec, 3),
+                request=payload,
+                response=None,
+                error=error,
             )
             if attempt < MAX_RETRIES - 1:
                 time.sleep(RETRY_DELAY * (2 ** attempt if status_code == 429 else attempt + 1))
         except Exception as exc:
+            duration_sec = time.time() - attempt_started
             token_tracker.record(
                 0,
                 0,
                 _config["model"],
                 task_name,
                 stage=stage,
-                duration_sec=time.time() - attempt_started,
+                duration_sec=duration_sec,
                 success=False,
                 attempt=attempt + 1,
                 status="api_error",
+                error=str(exc),
+            )
+            record_trace_event(
+                task_name,
+                "llm_call",
+                stage=stage or "unknown",
+                attempt=attempt + 1,
+                status="api_error",
+                duration_sec=round(duration_sec, 3),
+                request=payload,
+                response=None,
                 error=str(exc),
             )
             if attempt < MAX_RETRIES - 1:

@@ -7,6 +7,7 @@
 - `scripts/generate_tasks.sh` - convenience wrapper для подготовки seed и запуска генератора.
 - `sources/stackoverflow/prepare_dataset.py` - нормализация JSONL, фильтрация, сортировка и выборка seed.
 - `generator/task_generator.py` - CLI entrypoint генерации задач.
+- `generator/tracing.py` - crash-tolerant per-task JSONL traces всех LLM calls.
 - `generator/task_builder.py` - координатор одной задачи без prompt text и Docker subprocess logic.
 - `generator/agents/task_generation.py` - LLM agents для `instruction`, `environment`, `solution`, `tests`, `Dockerfile`.
 - `generator/repair/agent.py` и `generator/repair/loop.py` - controlled repair loop для failed задач.
@@ -37,6 +38,7 @@ Wrapper пишет:
 
 - `OUTPUT_DIR/seed.json`, если не переопределен `SEED_JSON`;
 - `OUTPUT_DIR/candidates`, если не переопределен `CANDIDATES_DIR`.
+- `OUTPUT_DIR/generation_traces`, если не переопределен `TRACE_DIR`.
 
 ## Подготовка Seed
 
@@ -110,6 +112,10 @@ question_id as stable tie-breaker
 ```text
 prompts/task_generator/system.md
 prompts/task_generator/instruction.md
+prompts/task_generator/instruction_rewrite_concise_system.md
+prompts/task_generator/instruction_rewrite_concise.md
+prompts/task_generator/instruction_rewrite_lossy_system.md
+prompts/task_generator/instruction_rewrite_lossy.md
 prompts/task_generator/environment.md
 prompts/task_generator/solution.md
 prompts/task_generator/tests.md
@@ -160,12 +166,39 @@ PROMPT_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "prompts" / "task_ge
 
 Для `instruction` включен `check_truncation=True`. При подозрении на обрезанный JSON/fenced block запрос повторяется, если остались retry.
 
+## Траектории Генерации
+
+При запуске через `scripts/generate_tasks.sh` полный LLM trace включен по умолчанию. Прямой CLI включает его через:
+
+```bash
+python -m generator.task_generator \
+  --input seed.json \
+  --output candidates \
+  --trace-dir generation_traces \
+  ...
+```
+
+Для каждой задачи создается отдельный append-only файл:
+
+```text
+generation_traces/task_00000.jsonl
+```
+
+JSONL начинается с `task_started`, затем содержит по одному `llm_call` на каждый API attempt и завершается `task_finished`. В `llm_call` сохраняются:
+
+- stage и номер attempt;
+- полный request payload с system/user messages;
+- полный OpenAI-compatible response, включая assistant `content`, `reasoning_content`, usage и finish reason;
+- status, duration и error для failed/retried requests.
+
+Каждое событие содержит `schema_version`, `run_id`, `task_name` и монотонный `sequence`. Запись выполняется сразу после API attempt, поэтому уже завершенные stages остаются в JSONL при падении процесса или задачи. Trace directory находится вне `candidates/` и не попадает в Docker build context или verifier.
+
 ## Генерация Task Directory
 
 `TaskGenerator.generate()` выполняет каскадно:
 
 ```text
-instruction -> environment -> solution -> difficulty -> tests -> dockerfile -> write_files
+instruction -> environment -> solution -> difficulty -> tests -> dockerfile -> instruction_rewrite -> write_files
 ```
 
 Если критическая стадия не вернула результат, задача считается failed и не записывается.
@@ -192,7 +225,42 @@ Temperature по умолчанию не передается.
 
 Ответ принимается как raw Markdown. Если модель обернула его в ```markdown, wrapper удаляется.
 
-### 2. `environment/`
+### 2. Instruction Rewrite
+
+После генерации environment, reference solution, tests и Dockerfile выполняется отдельная финальная LLM-стадия rewrite. Production wrapper по умолчанию использует:
+
+```text
+INSTRUCTION_REWRITE_MODE=mixed
+LOSSY_INSTRUCTION_RATIO=0.25
+```
+
+Доступны четыре режима:
+
+- `off` - оставить полную generated instruction без дополнительного вызова;
+- `concise` - сократить boilerplate, hints и готовый способ решения, сохранив observable contract и все абсолютные пути;
+- `lossy` - превратить задачу в короткий issue report, намеренно опуская пути, команды, алгоритм, file checklist и диагностические подсказки;
+- `mixed` - детерминированно выбрать `concise` или `lossy` по `question_id` и `LOSSY_INSTRUCTION_RATIO`.
+
+Выбор в `mixed` основан на SHA-256 от `question_id`, поэтому не меняется от количества workers, порядка завершения или resume. При ratio `0.25` примерно 75% задач получают `concise`, 25% - `lossy`.
+
+Rewrite делает до трех попыток. Для `concise` static review проверяет, что все absolute paths из полной инструкции сохранены verbatim и ответ не превышает 350 слов. Для `lossy` пути разрешено опускать или неточно пересказывать; проверяется только, что ответ содержит 20-120 слов. Если валидный rewrite не получен, задача считается failed и не записывается.
+
+Все стадии построения задачи получают полную detailed instruction. Rewrite меняет только финальный user-facing `instruction.md`; environment, solution, tests и Dockerfile к этому моменту уже готовы и не регенерируются. В generation trace сохраняются:
+
+- исходный `instruction` LLM call;
+- каждый `instruction_rewrite_concise` или `instruction_rewrite_lossy` LLM call;
+- событие `instruction_rewrite_applied` с requested/selected mode и длинами до/после.
+
+Выбранный стиль записывается в `task.toml` как `metadata.instruction_rewrite_mode`.
+
+CLI-параметры:
+
+```bash
+--instruction-rewrite-mode off|concise|lossy|mixed
+--lossy-instruction-ratio 0.25
+```
+
+### 3. `environment/`
 
 Метод: `_generate_environment(instruction)`.
 
@@ -221,7 +289,7 @@ Temperature по умолчанию не передается.
 
 Все пути интерпретируются относительно `environment/`.
 
-### 3. `solution/solve.sh`
+### 4. `solution/solve.sh`
 
 Метод: `_generate_solution(instruction, env_data)`.
 
@@ -244,7 +312,7 @@ Temperature по умолчанию не передается.
 
 Ответ извлекается из ```bash или ```sh block. Если fenced block нет, берется весь response.
 
-### 4. Difficulty
+### 5. Difficulty
 
 Метод: `_assess_difficulty(instruction)`.
 
@@ -267,7 +335,7 @@ medium:
 
 `code_blocks` считается по cleaned question body: `body.count("```") // 2`.
 
-### 5. `tests/`
+### 6. `tests/`
 
 Метод: `_generate_tests(instruction, env_data, solution)`.
 
@@ -308,7 +376,7 @@ Prompt для этой стадии явно синхронизирован с r
 
 Если review прошел, тесты принимаются, а `test_sh` принудительно заменяется на `STATIC_TEST_SH`. Если review отклонил, candidate сохраняется уже со статическим runner-ом. Если ни один из 3 attempts не прошел, но были syntactically valid candidates, возвращается первый rejected candidate. Если candidates нет, стадия failed.
 
-### 6. `environment/Dockerfile`
+### 7. `environment/Dockerfile`
 
 Метод: `_generate_dockerfile(instruction, env_data, solution, test_data)`.
 

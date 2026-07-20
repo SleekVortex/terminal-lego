@@ -11,6 +11,10 @@ from generator.prompt_loader import (
     DOCKERFILE_PROMPT_TEMPLATE,
     ENVIRONMENT_PROMPT_TEMPLATE,
     INSTRUCTION_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_CONCISE_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_CONCISE_SYSTEM_PROMPT,
+    INSTRUCTION_REWRITE_LOSSY_PROMPT_TEMPLATE,
+    INSTRUCTION_REWRITE_LOSSY_SYSTEM_PROMPT,
     SOLUTION_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
     TEST_PROMPT_TEMPLATE,
@@ -22,12 +26,18 @@ from generator.reviewers.dockerfile_review import (
 )
 from generator.reviewers.solution_review import review_solution_shell
 from generator.reviewers.test_review import STATIC_TEST_SH, parse_test_outputs_py, review_tests
-from generator.settings import DOCKERFILE_MAX_ATTEMPTS, TEST_MAX_ATTEMPTS
+from generator.settings import (
+    DOCKERFILE_MAX_ATTEMPTS,
+    INSTRUCTION_REWRITE_MAX_ATTEMPTS,
+    TEST_MAX_ATTEMPTS,
+)
 from generator.task_writer import format_env_file_list
 from generator.text_utils import clean_html
 
 
 logger = logging.getLogger(__name__)
+
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)+")
 
 
 def extract_fenced(response: str, language: str) -> Optional[str]:
@@ -49,6 +59,32 @@ def parse_json_response(response: str) -> Optional[dict[str, Any]]:
         if isinstance(parsed, dict):
             return parsed
     return None
+
+
+def clean_markdown_response(response: str) -> str:
+    content = response.strip()
+    fenced = extract_fenced(content, "markdown")
+    if fenced is not None:
+        return fenced
+    if content.startswith("```"):
+        content = content[3:]
+        first_line, separator, remainder = content.partition("\n")
+        if separator and first_line.strip().isalpha():
+            content = remainder
+        if content.endswith("```"):
+            content = content[:-3]
+    return content.strip()
+
+
+def extract_absolute_paths(instruction: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in ABSOLUTE_PATH_RE.finditer(instruction):
+        path = match.group(0).rstrip("`.,;:)]}")
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
 
 
 class TaskStageAgent(LLMAgent):
@@ -75,6 +111,78 @@ class InstructionAgent(TaskStageAgent):
             if response.endswith("```"):
                 response = response[:-3]
         return response.strip()
+
+
+class InstructionRewriteAgent(LLMAgent):
+    def __init__(self, llm_call: LLMCall, task_name: str, mode: str):
+        if mode == "concise":
+            system_prompt = INSTRUCTION_REWRITE_CONCISE_SYSTEM_PROMPT
+        elif mode == "lossy":
+            system_prompt = INSTRUCTION_REWRITE_LOSSY_SYSTEM_PROMPT
+        else:
+            raise ValueError(f"Unsupported instruction rewrite mode: {mode}")
+        super().__init__(llm_call, system_prompt, task_name)
+        self.mode = mode
+
+    def run(self, instruction: str) -> Optional[str]:
+        required_paths = extract_absolute_paths(instruction) if self.mode == "concise" else []
+        base_prompt = self._build_prompt(instruction, required_paths)
+        feedback = ""
+        for attempt in range(INSTRUCTION_REWRITE_MAX_ATTEMPTS):
+            prompt = base_prompt
+            if feedback:
+                prompt += (
+                    "\n\nThe previous rewrite was rejected:\n"
+                    + feedback
+                    + "\nRewrite the original task again and output only the rewritten request."
+                )
+            response = self.call(prompt, f"instruction_rewrite_{self.mode}")
+            if not response:
+                feedback = "- The model returned an empty response."
+                continue
+            rewritten = clean_markdown_response(response)
+            issues = self._review(rewritten, required_paths)
+            if not issues:
+                return rewritten
+            feedback = "\n".join(f"- {issue}" for issue in issues)
+            logger.warning(
+                "[%s] %s instruction rewrite rejected (round %s): %s",
+                self.task_name,
+                self.mode,
+                attempt + 1,
+                issues,
+            )
+        return None
+
+    def _build_prompt(self, instruction: str, required_paths: list[str]) -> str:
+        if self.mode == "lossy":
+            return INSTRUCTION_REWRITE_LOSSY_PROMPT_TEMPLATE.format(instruction=instruction)
+
+        required_paths_section = ""
+        if required_paths:
+            required_paths_section = (
+                "\nThe following absolute paths must appear verbatim in the rewrite:\n"
+                + "\n".join(f"- `{path}`" for path in required_paths)
+                + "\n"
+            )
+        return INSTRUCTION_REWRITE_CONCISE_PROMPT_TEMPLATE.format(
+            instruction=instruction,
+            required_paths_section=required_paths_section,
+        )
+
+    def _review(self, rewritten: str, required_paths: list[str]) -> list[str]:
+        issues: list[str] = []
+        word_count = len(rewritten.split())
+        if word_count < 20:
+            issues.append(f"rewrite is too short: {word_count} words")
+        max_words = 350 if self.mode == "concise" else 120
+        if word_count > max_words:
+            issues.append(f"rewrite is too long: {word_count} words, maximum is {max_words}")
+        if self.mode == "concise":
+            missing_paths = [path for path in required_paths if path not in rewritten]
+            if missing_paths:
+                issues.append("missing required paths: " + ", ".join(missing_paths))
+        return issues
 
 
 class EnvironmentAgent(TaskStageAgent):

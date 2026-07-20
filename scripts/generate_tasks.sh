@@ -9,6 +9,7 @@ Usage:
 Environment:
   SEED_JSON              Seed output path. Default: OUTPUT_DIR/seed.json
   CANDIDATES_DIR         Generated tasks dir. Default: OUTPUT_DIR/candidates
+  TRACE_DIR              LLM generation traces. Default: OUTPUT_DIR/generation_traces
   MIN_SCORE              Optional StackOverflow score filter.
   CATEGORY               Optional Terminal-Bench category filter. Repeat by comma.
   PER_CATEGORY           Optional top N rows per category, e.g. 2.
@@ -22,6 +23,10 @@ Environment:
   MODEL_NAME             LLM model for task generation.
   OPENAI_API_BASE        OpenAI-compatible API base.
   OPENAI_API_KEY         API key. Default: EMPTY
+  INSTRUCTION_REWRITE_MODE
+                         off, concise, lossy, or mixed. Default: mixed
+  LOSSY_INSTRUCTION_RATIO
+                         Lossy share in mixed mode. Default: 0.25
 
 Any extra CLI arguments are passed to python -m generator.task_generator.
 USAGE
@@ -56,12 +61,15 @@ OUTPUT_DIR="$(make_abs_path "$OUTPUT_DIR")"
 
 SEED_JSON="${SEED_JSON:-${OUTPUT_DIR}/seed.json}"
 CANDIDATES_DIR="${CANDIDATES_DIR:-${OUTPUT_DIR}/candidates}"
+TRACE_DIR="${TRACE_DIR:-${OUTPUT_DIR}/generation_traces}"
 START="${START:-0}"
 SORT_BY_SCORE="${SORT_BY_SCORE:-1}"
 WORKERS="${WORKERS:-1}"
 OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
+INSTRUCTION_REWRITE_MODE="${INSTRUCTION_REWRITE_MODE:-mixed}"
+LOSSY_INSTRUCTION_RATIO="${LOSSY_INSTRUCTION_RATIO:-0.25}"
 
-mkdir -p "${OUTPUT_DIR}" "${CANDIDATES_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${CANDIDATES_DIR}" "${TRACE_DIR}"
 
 prepare_args=(
   --input "${INPUT_JSONL}"
@@ -101,6 +109,9 @@ generator_args=(
   --output "${CANDIDATES_DIR}"
   --workers "${WORKERS}"
   --api-key "${OPENAI_API_KEY}"
+  --trace-dir "${TRACE_DIR}"
+  --instruction-rewrite-mode "${INSTRUCTION_REWRITE_MODE}"
+  --lossy-instruction-ratio "${LOSSY_INSTRUCTION_RATIO}"
 )
 
 if [[ -n "${OPENAI_API_BASE:-}" ]]; then
@@ -119,3 +130,4 @@ python -m generator.task_generator "${generator_args[@]}" "$@"
 
 echo "Seed: ${SEED_JSON}"
 echo "Candidates: ${CANDIDATES_DIR}"
+echo "Generation traces: ${TRACE_DIR}"

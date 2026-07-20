@@ -12,6 +12,12 @@ from solvers import parsing
 from solvers import run_solutions as sg
 from solvers import settings as solver_settings
 from solvers import summary as solution_summary
+from solvers.agents.deepagent import (
+    DEEPAGENT_PROJECT_DIR,
+    DeepAgent,
+    merge_reasoning_records,
+    trajectory_from_langgraph_result,
+)
 from solvers.agents.preinstalled_opencode import (
     OPENCODE_SYSTEM_PROMPT,
     PreinstalledOpenCode,
@@ -174,6 +180,146 @@ def test_build_job_config_uses_import_path_for_preinstalled_opencode(
     assert agent.model_name == "openai/glm"
     assert agent.kwargs["api_base"] == "http://host.docker.internal:30003/v1"
     assert agent.kwargs["api_key"] == "EMPTY"
+
+
+def test_build_job_config_uses_import_path_for_deepagent(tmp_path: Path) -> None:
+    single_task = tmp_path / "task_00000"
+    single_task.mkdir()
+    (single_task / "task.toml").write_text('version = "1.0"\n', encoding="utf-8")
+
+    args = sg.parse_args(
+        [
+            "--tasks-dir",
+            str(single_task),
+            "--jobs-dir",
+            str(tmp_path / "jobs"),
+            "--agent",
+            "deepagent",
+            "--model",
+            "openai/glm-5.2-fp8",
+            "--api-base",
+            "http://host.docker.internal:30301/v1",
+            "--api-key",
+            "EMPTY",
+        ]
+    )
+
+    config = config_builder.build_job_config(args)
+    agent = config.agents[0]
+
+    assert agent.name is None
+    assert agent.import_path == solver_settings.import_path_for_agent(
+        solver_settings.DEEPAGENT_AGENT
+    )
+    assert agent.model_name == "openai/glm-5.2-fp8"
+    assert agent.kwargs["api_base"] == "http://host.docker.internal:30301/v1"
+    assert agent.kwargs["api_key"] == "EMPTY"
+
+
+def test_deepagent_configures_local_chat_completions(tmp_path: Path) -> None:
+    agent = DeepAgent(
+        logs_dir=tmp_path,
+        model_name="openai/glm-5.2-fp8",
+        api_base="http://host.docker.internal:30301/v1",
+        api_key="EMPTY",
+        model_kwargs={"timeout": 1800},
+    )
+
+    assert agent.project_path == DEEPAGENT_PROJECT_DIR
+    assert agent.graph == "deepagent"
+    assert agent.model_kwargs == {
+        "timeout": 1800,
+        "base_url": "http://host.docker.internal:30301/v1",
+        "use_responses_api": False,
+        "api_key": "EMPTY",
+    }
+    assert agent.configurable == {"cwd": "/app"}
+
+
+def test_deepagent_project_pins_prerelease_before_code_package() -> None:
+    project_config = json.loads(
+        (DEEPAGENT_PROJECT_DIR / "langgraph.json").read_text(encoding="utf-8")
+    )
+
+    dependencies = project_config["dependencies"]
+    assert "deepagents-0.7.0a7-py3-none-any.whl#sha256=" in dependencies[0]
+    assert dependencies[1] == "deepagents-code==0.1.43"
+
+
+def test_deepagent_converts_langgraph_messages_to_atif() -> None:
+    result = {
+            "messages": [
+                {"type": "human", "content": "fix it"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "name": "shell",
+                            "args": {"command": "pwd"},
+                        }
+                    ],
+                    "usage_metadata": {
+                        "input_tokens": 11,
+                        "output_tokens": 3,
+                        "input_token_details": {"cache_read": 2},
+                    },
+                },
+                {"type": "tool", "content": "/app"},
+                {
+                    "type": "ai",
+                    "content": "done",
+                    "usage_metadata": {"input_tokens": 17, "output_tokens": 4},
+                },
+            ]
+        }
+    merged = merge_reasoning_records(
+        result,
+        {
+            "records": [
+                {
+                    "message_index": 1,
+                    "reasoning_content": "I should inspect the working directory.",
+                    "reasoning_tokens": 9,
+                },
+                {
+                    "message_index": 3,
+                    "reasoning_content": "The task is complete.",
+                    "reasoning_tokens": 5,
+                },
+            ]
+        },
+    )
+    trajectory = trajectory_from_langgraph_result(
+        result,
+        instruction="fix it",
+        model_name="openai/glm-5.2-fp8",
+        session_id="session-1",
+    )
+
+    assert merged == 2
+    assert [step.source for step in trajectory.steps] == [
+        "system",
+        "user",
+        "agent",
+        "agent",
+    ]
+    tool_step = trajectory.steps[2]
+    assert tool_step.tool_calls is not None
+    assert tool_step.tool_calls[0].function_name == "shell"
+    assert tool_step.observation is not None
+    assert tool_step.observation.results[0].source_call_id == "call-1"
+    assert tool_step.observation.results[0].content == "/app"
+    assert tool_step.reasoning_content == "I should inspect the working directory."
+    assert tool_step.metrics is not None
+    assert tool_step.metrics.extra == {"reasoning_tokens": 9}
+    assert trajectory.steps[3].reasoning_content == "The task is complete."
+    assert trajectory.final_metrics is not None
+    assert trajectory.final_metrics.total_prompt_tokens == 28
+    assert trajectory.final_metrics.total_completion_tokens == 7
+    assert trajectory.final_metrics.total_cached_tokens == 2
+    assert trajectory.final_metrics.extra == {"total_reasoning_tokens": 14}
 
 
 def test_build_job_config_rejects_missing_task_path(tmp_path: Path) -> None:

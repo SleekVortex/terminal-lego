@@ -81,6 +81,8 @@ PER_CATEGORY=2 \
 MODEL_NAME=openai/glm-5.2-fp8 \
 OPENAI_API_BASE=http://localhost:30002/v1 \
 OPENAI_API_KEY=EMPTY \
+INSTRUCTION_REWRITE_MODE=mixed \
+LOSSY_INSTRUCTION_RATIO=0.25 \
 scripts/generate_tasks.sh \
     /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
     ./data/so_smoke
@@ -161,6 +163,9 @@ task_00001/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKERS` | 1 | Parallel threads for task generation wrapper |
+| `TRACE_DIR` | `OUTPUT_DIR/generation_traces` | Per-task JSONL traces with full task-generation LLM requests and responses |
+| `INSTRUCTION_REWRITE_MODE` | `mixed` | `off`, contract-preserving `concise`, under-specified `lossy`, or deterministic mix |
+| `LOSSY_INSTRUCTION_RATIO` | `0.25` | Share of tasks assigned lossy instructions in `mixed` mode |
 | `VAL_WORKERS` | 8 | Parallel threads for validation |
 | `VAL_TIMEOUT` | 300 | Docker timeout per step (seconds) |
 | `MODEL_NAME` | claude-opus-4-6 | LLM model name |

@@ -13,15 +13,25 @@ from pathlib import Path
 
 
 from generator.contracts import SOQuestion
+from generator.instruction_style import (
+    INSTRUCTION_REWRITE_MODES,
+    validate_lossy_ratio,
+)
 from generator.llm_client import (
     DEFAULT_API_BASE,
     DEFAULT_MODEL,
     _config,
     call_llm_api,
+    configure_trace_writer,
+    get_trace_writer,
     token_tracker,
 )
 from generator.task_builder import TaskGenerator as _TaskBuilder
 from generator.resume import build_task_args as _build_task_args
+from generator.settings import (
+    DEFAULT_INSTRUCTION_REWRITE_MODE,
+    DEFAULT_LOSSY_INSTRUCTION_RATIO,
+)
 
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -45,20 +55,37 @@ class Counter:
 progress_counter = Counter()
 error_counter = Counter()
 skip_counter = Counter()
+_instruction_rewrite_mode = DEFAULT_INSTRUCTION_REWRITE_MODE
+_lossy_instruction_ratio = DEFAULT_LOSSY_INSTRUCTION_RATIO
 
 
 class TaskGenerator(_TaskBuilder):
     """Bind the orchestrator to the CLI-configured LLM client."""
 
     def __init__(self, question: SOQuestion, output_dir: Path, index: int | None = None) -> None:
-        super().__init__(question, output_dir, index=index, llm_call=lambda *args, **kwargs: call_llm_api(*args, **kwargs))
+        super().__init__(
+            question,
+            output_dir,
+            index=index,
+            llm_call=lambda *args, **kwargs: call_llm_api(*args, **kwargs),
+            instruction_rewrite_mode=_instruction_rewrite_mode,
+            lossy_instruction_ratio=_lossy_instruction_ratio,
+        )
 
 
 def process_question(args: tuple) -> bool:
     question_data, output_dir, total_count, index = args
+    generator = None
+    trace_started = False
+    success = False
+    error = None
     try:
         question = SOQuestion.from_dict(question_data)
         generator = TaskGenerator(question, output_dir, index=index)
+        trace_writer = get_trace_writer()
+        if trace_writer is not None:
+            trace_writer.task_started(generator.task_name, question)
+            trace_started = True
         success = generator.generate()
         current = progress_counter.increment()
         if success:
@@ -68,12 +95,27 @@ def process_question(args: tuple) -> bool:
             logger.error("Progress: %s/%s - FAIL: %s", current, total_count, generator.task_name)
         return success
     except Exception as exc:
+        error = str(exc)
         error_counter.increment()
         logger.exception("Exception processing question: %s", exc)
         return False
+    finally:
+        if trace_started and generator is not None:
+            try:
+                trace_writer = get_trace_writer()
+                if trace_writer is not None:
+                    trace_writer.task_finished(
+                        generator.task_name,
+                        success,
+                        error or ("generation_failed" if not success else None),
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finish trace for %s: %s", generator.task_name, exc)
 
 
 def main() -> None:
+    global _instruction_rewrite_mode, _lossy_instruction_ratio
+
     parser = argparse.ArgumentParser(description="Terminal-Lego task generator")
     parser.add_argument("--input", "-i", required=True, help="Input JSON file with questions")
     parser.add_argument("--output", "-o", default="./candidates", help="Output directory")
@@ -84,7 +126,39 @@ def main() -> None:
     parser.add_argument("--api-base", type=str, default=None, help="API base URL")
     parser.add_argument("--api-key", type=str, default=None, help="API key")
     parser.add_argument("--model", type=str, default=None, help="Model name")
+    parser.add_argument(
+        "--instruction-rewrite-mode",
+        choices=INSTRUCTION_REWRITE_MODES,
+        default=os.environ.get(
+            "INSTRUCTION_REWRITE_MODE",
+            DEFAULT_INSTRUCTION_REWRITE_MODE,
+        ),
+        help="Instruction rewrite policy: off, concise, lossy, or deterministic mixed.",
+    )
+    parser.add_argument(
+        "--lossy-instruction-ratio",
+        type=float,
+        default=float(
+            os.environ.get(
+                "LOSSY_INSTRUCTION_RATIO",
+                DEFAULT_LOSSY_INSTRUCTION_RATIO,
+            )
+        ),
+        help="Lossy share used by mixed mode. Must be between 0 and 1.",
+    )
+    parser.add_argument(
+        "--trace-dir",
+        type=Path,
+        default=None,
+        help="Write task-generation request/response events as task-specific JSONL files.",
+    )
     args = parser.parse_args()
+
+    try:
+        _lossy_instruction_ratio = validate_lossy_ratio(args.lossy_instruction_ratio)
+    except ValueError as exc:
+        parser.error(str(exc))
+    _instruction_rewrite_mode = args.instruction_rewrite_mode
 
     _config["api_base"] = args.api_base or os.environ.get("OPENAI_API_BASE", DEFAULT_API_BASE)
     _config["api_key"] = args.api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -96,6 +170,11 @@ def main() -> None:
 
     logger.info("Model: %s", _config["model"])
     logger.info("API base: %s", _config["api_base"])
+    logger.info(
+        "Instruction rewrite: mode=%s lossy_ratio=%.3f",
+        _instruction_rewrite_mode,
+        _lossy_instruction_ratio,
+    )
 
     with open(args.input, "r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -105,6 +184,9 @@ def main() -> None:
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    trace_writer = configure_trace_writer(str(args.trace_dir.resolve()) if args.trace_dir else None)
+    if trace_writer is not None:
+        logger.info("Generation traces: %s", trace_writer.output_dir)
 
     task_args, resume_info = _build_task_args(
         questions,
@@ -152,6 +234,10 @@ def main() -> None:
         "model": _config["model"],
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "token_usage": token_tracker.get_summary(),
+        "trace_dir": str(trace_writer.output_dir) if trace_writer is not None else None,
+        "trace_run_id": trace_writer.run_id if trace_writer is not None else None,
+        "instruction_rewrite_mode": _instruction_rewrite_mode,
+        "lossy_instruction_ratio": _lossy_instruction_ratio,
     }
     with open(output_dir / "generation_summary.json", "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)

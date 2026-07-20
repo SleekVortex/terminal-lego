@@ -12,6 +12,18 @@ def load_prompt_template(filename: str) -> str:
 
 SYSTEM_PROMPT = load_prompt_template("system.md")
 INSTRUCTION_PROMPT_TEMPLATE = load_prompt_template("instruction.md")
+INSTRUCTION_REWRITE_CONCISE_SYSTEM_PROMPT = load_prompt_template(
+    "instruction_rewrite_concise_system.md"
+)
+INSTRUCTION_REWRITE_CONCISE_PROMPT_TEMPLATE = load_prompt_template(
+    "instruction_rewrite_concise.md"
+)
+INSTRUCTION_REWRITE_LOSSY_SYSTEM_PROMPT = load_prompt_template(
+    "instruction_rewrite_lossy_system.md"
+)
+INSTRUCTION_REWRITE_LOSSY_PROMPT_TEMPLATE = load_prompt_template(
+    "instruction_rewrite_lossy.md"
+)
 ENVIRONMENT_PROMPT_TEMPLATE = load_prompt_template("environment.md")
 SOLUTION_PROMPT_TEMPLATE = load_prompt_template("solution.md")
 TEST_PROMPT_TEMPLATE = load_prompt_template("tests.md")

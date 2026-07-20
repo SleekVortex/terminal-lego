@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    "https://files.pythonhosted.org/packages/7f/f0/39e7a327baf4f597624ce024d3d59968d7068f0216f0e8469e952fc8a574/deepagents-0.7.0a7-py3-none-any.whl#sha256=5c2080e3f630c200abed416748fd9fa3e12bc954d5052ea14ba84fee76d5698b",
+    "deepagents-code==0.1.43"
+  ],
+  "graphs": {
+    "deepagent": "./langgraph_agent.py:make_graph"
+  }
+}
