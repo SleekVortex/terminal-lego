@@ -218,6 +218,58 @@ System prompt отдельно запрещает чтение `/tests`, `/solut
 files и требует создать executable `/logs/artifacts/solve.sh`. Общий
 `materialize_solution.md` по-прежнему добавляется wrapper-ом к инструкции.
 
+## Сбор Заданного Числа Успешных Траекторий
+
+`scripts/collect_solutions.py` запускает solution generation батчами, пока не
+соберет заданное число пригодных траекторий. В квоту входит только уникальная
+задача, для которой одновременно выполнены условия:
+
+- verifier reward не ниже `--reward-threshold`;
+- агент создал `/logs/artifacts/solve.sh`;
+- Harbor сохранил `agent/trajectory.json`.
+
+Упавшая или нерешенная задача записывается в failed manifest и больше не
+запускается. Collector берет следующую задачу из `--tasks-dir`. Передавать лучше
+директорию уже провалидированных задач.
+
+```bash
+.venv/bin/python -m scripts.collect_solutions \
+  --tasks-dir ./validated \
+  --output ./terminal-lego-work/solution-generation/deepagent-glm52-10k \
+  --target-accepted 10000 \
+  --agent deepagent \
+  --model openai/glm-5.2-fp8 \
+  --api-base http://host.docker.internal:30301/v1 \
+  --api-key EMPTY \
+  --n-concurrent 16 \
+  --batch-size 64 \
+  -- \
+  --agent-kwarg 'model_kwargs={"timeout":1800}'
+```
+
+Повтор той же команды возобновляет collection из `collector_state.json`.
+Endpoint, harness, model, task directory и solver arguments должны совпадать с
+первым запуском. Concurrency и batch size при resume можно менять.
+
+Collector пишет:
+
+```text
+<output>/collector_state.json
+<output>/collection_summary.json
+<output>/accepted_trajectories.jsonl
+<output>/failed_trials.jsonl
+<output>/logs/batch-*.log
+<output>/batches/batch-*/...
+```
+
+Батч без успешных решений не считается инфраструктурным сбоем, если verifier
+вернул хотя бы один числовой reward, включая `0`. Если несколько батчей подряд
+не содержат ни одного числового reward, collector завершится со status
+`stalled`. Порог задается `--max-stalled-batches` (по умолчанию `3`). Если пул
+полных задач закончился раньше квоты, status будет `exhausted`. В обоих случаях
+ту же команду можно запустить снова после восстановления endpoint или появления
+новых задач.
+
 ## Materialize Solution Prompt
 
 `prompts/solution_generator/materialize_solution.md` добавляется в Harbor job как `extra_instruction_path`.
