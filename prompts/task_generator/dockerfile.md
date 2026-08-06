@@ -22,6 +22,8 @@ Based on the following Terminal Bench task, generate a Dockerfile for the enviro
 6. Use the generated artifact context below to include task runtime dependencies and copy any
    required non-task_file build-context files such as requirements.txt, package.json, setup.sh,
    init.sh, or config files.
+7. Keep the built image unsolved. Use the reference solution and verifier only to infer dependencies;
+   never copy, embed, execute, or reproduce them, and do not generate requested outputs or apply the fix during the build.
 
 **Output format:**
 ```dockerfile

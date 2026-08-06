@@ -1,7 +1,7 @@
 # StackOverflow dump datasets
 
-This directory contains the local-dump StackOverflow preparation flow used before
-`python -m generator.task_generator`.
+This directory contains the StackOverflow preparation code used by the canonical
+`scripts.run_task_pipeline` entrypoint.
 
 The expected input is JSONL produced from `Posts.xml` with at least:
 
@@ -25,29 +25,18 @@ Optional fields such as `categories` and `selected_category` are preserved. If
 they are missing, `prepare_dataset.py` classifies the row from tags using
 `terminal_bench_tag_taxonomy.json`.
 
-## Create a generator seed
+## Generate and validate tasks
 
-Balanced smoke seed from an already-filtered JSONL:
+The production pipeline prepares the seed, generates tasks, and immediately
+validates each generated candidate:
 
 ```bash
-python -m sources.stackoverflow.prepare_dataset \
+.venv/bin/python -m scripts.run_task_pipeline \
   --input /data/avzavodov/stackoverflow_posts_xml/sets/so_posts_6y_score_ge_0_our_categories_top100k_tbench_dist_20260702T170248+0300/questions.jsonl \
-  --output ./data/so_seed_balanced32.json \
-  --format generator-json \
+  --output ./terminal-lego-work/task-generation/so-balanced32 \
   --per-category 2 \
-  --sort-by-score
-```
-
-Then generate tasks:
-
-```bash
-python -m generator.task_generator \
-  --input ./data/so_seed_balanced32.json \
-  --output ./data/candidates_so_seed_balanced32 \
-  --workers 1 \
-  --api-base "$OPENAI_API_BASE" \
-  --api-key "$OPENAI_API_KEY" \
-  --model "$MODEL_NAME"
+  --generate-workers 32 \
+  --validate-workers 32
 ```
 
 ## Create a 100k benchmark-distribution JSONL

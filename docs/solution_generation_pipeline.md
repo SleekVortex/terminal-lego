@@ -1,649 +1,115 @@
-# Solution Generation Pipeline
+# Solution generation with Harbor
 
-Документ описывает текущую реализацию запуска solver agents и генерации решений для уже готовых Terminal-Lego задач.
+Terminal-Lego does not implement a solution runner. It produces accepted task
+directories and delegates solution generation directly to `harbor==0.20.0`.
 
-## Основные Файлы
+## Input contract
 
-- `scripts/generate_solutions.sh` - convenience wrapper для запуска solution generation.
-- `solvers/run_solutions.py` - Python CLI, который строит Harbor `JobConfig`, запускает job и собирает summary.
-- `prompts/solution_generator/materialize_solution.md` - extra instruction для агента: материализовать итоговое решение в `/logs/artifacts/solve.sh`.
-- `configs/harbor/docker-compose-bridge-network.yaml` - опциональный Harbor compose override для `network_mode: bridge`.
-- `configs/opencode/` - preinstalled OpenCode runtime config для запуска OpenCode без скачивания nvm/npm внутри каждого trial.
-
-## Общая Схема
+Pass the complete accepted dataset to Harbor:
 
 ```text
-validated Terminal-Lego tasks
-  -> scripts/generate_solutions.sh
-  -> solvers/run_solutions.py
-  -> Harbor Job
-  -> agent runs task in Docker environment
-  -> verifier runs tests
-  -> result.json + trajectory + materialized solve.sh
-  -> solution_generation_summary.json
-  -> accepted_trajectories.jsonl / failed_trials.jsonl
-```
-
-Task generation и solution generation разделены. На вход solution generation подается уже готовая папка задач:
-
-```text
-validated/
+accepted/
   task_00001/
     instruction.md
     task.toml
     environment/Dockerfile
     environment/task_file/...
+    solution/solve.sh
     tests/test.sh
     tests/test_outputs.py
 ```
 
-`solution/solve.sh` в задаче может существовать как reference solution, но solver agent не должен читать reference solution. Для agent solution используется отдельный materialized artifact:
+Harbor discovers the direct task subdirectories under the path supplied with
+`-p`. Production runs do not use a task-name filter or a second scheduler.
 
-```text
-<trial>/artifacts/logs/artifacts/solve.sh
-```
+## Terminus 2
 
-## Запуск Через Wrapper
-
-Базовый запуск:
+`terminus-2` calls the model from the Harbor host process:
 
 ```bash
-AGENT=terminus-2 \
-MODEL_NAME=openai/glm-5.2-fp8 \
-OPENAI_API_BASE=http://localhost:30002/v1 \
+export MODEL_NAME=openai/MiniMaxAI/MiniMax-M3
+export TASKS_DIR=/absolute/path/to/accepted
+export JOBS_DIR=/absolute/path/to/solution-generation
+
+OPENAI_API_BASE=http://127.0.0.1:30114/v1 \
 OPENAI_API_KEY=EMPTY \
-scripts/generate_solutions.sh ./validated ./runs
+.venv/bin/harbor run \
+  -p "$TASKS_DIR" \
+  -a terminus-2 \
+  -m "$MODEL_NAME" \
+  -n 32 \
+  -o "$JOBS_DIR" \
+  --job-name terminus-2-full
 ```
 
-Wrapper принимает:
+## mini-swe-agent
+
+`mini-swe-agent` runs inside the task container, so its API base must be
+reachable from Docker. On the tested CPU setup, the task memory limit also had
+to be raised to 4096 MB for agent installation:
 
 ```bash
-scripts/generate_solutions.sh TASKS_DIR [JOBS_DIR] [extra solution_generator args...]
-```
+export MODEL_NAME=openai/MiniMaxAI/MiniMax-M3
+export TASKS_DIR=/absolute/path/to/accepted
+export JOBS_DIR=/absolute/path/to/solution-generation
+export DOCKER_API_BASE=http://172.16.0.1:30115/v1
 
-Значения по умолчанию:
-
-- `AGENT=terminus-2`;
-- `HARBOR_ENV=docker`;
-- `PYTHON_BIN=python3`;
-- `OPENAI_API_KEY=EMPTY`;
-- `JOB_NAME=solution-runs-<utc timestamp>`;
-- `N_ATTEMPTS=1`;
-- `N_CONCURRENT=1`;
-- `MAX_RETRIES=0`;
-- `DOCKER_NETWORK_STRATEGY=bridge`;
-- `CLEANUP_DOCKER=1`;
-- `MATERIALIZE_INSTRUCTION=prompts/solution_generator/materialize_solution.md`.
-- `OPENCODE_RUNTIME_DIR=configs/opencode/runtime` при `AGENT=preinstalled-opencode`.
-
-Wrapper собирает аргументы и вызывает:
-
-```bash
-python -m solvers.run_solutions ...
-```
-
-Все extra CLI args после `TASKS_DIR [JOBS_DIR]` пробрасываются в `run_solutions.py`.
-
-## Preinstalled OpenCode
-
-Обычный Harbor agent `opencode` устанавливает nvm, Node и `opencode-ai` внутри каждого task container. Для массовых solver runs это слишком медленно и зависит от GitHub/npm во время каждого trial.
-
-Для этого добавлен agent mode:
-
-```bash
-AGENT=preinstalled-opencode
-```
-
-Он использует Harbor `OpenCode.run()` и стандартный парсер trajectory, но заменяет сетевой install на проверку уже смонтированного runtime:
-
-```text
-/opt/terminal-lego/opencode/bin/opencode
-```
-
-Runtime собирается отдельно через `configs/opencode/Dockerfile`, переносится на `cpu`, затем извлекается в:
-
-```text
-configs/opencode/runtime/
-```
-
-Wrapper при `AGENT=preinstalled-opencode` автоматически добавляет:
-
-```text
---extra-docker-compose configs/opencode/docker-compose-runtime.yaml
-```
-
-и проверяет, что существует executable:
-
-```text
-${OPENCODE_RUNTIME_DIR}/bin/opencode
-```
-
-Пример запуска:
-
-```bash
-AGENT=preinstalled-opencode \
-MODEL_NAME=openai/glm-5.2-fp8 \
 OPENAI_API_KEY=EMPTY \
-DOCKER_NETWORK_STRATEGY=bridge \
-scripts/generate_solutions.sh ./validated ./runs
+.venv/bin/harbor run \
+  -p "$TASKS_DIR" \
+  -a mini-swe-agent \
+  -m "$MODEL_NAME" \
+  -n 32 \
+  -o "$JOBS_DIR" \
+  --job-name mini-swe-agent-full \
+  --agent-env OPENAI_API_KEY=EMPTY \
+  --agent-env OPENAI_API_BASE="$DOCKER_API_BASE" \
+  --override-memory-mb 4096
 ```
 
-Для Docker bridge нужен отдельный tunnel, который слушает Docker gateway, например:
+Both commands use only native Harbor options. There are no repository-local
+agent adapters, Docker Compose overlays, runtime bundles, or compatibility
+proxies.
+
+## Other agents
+
+Harbor 0.20 ships other agents such as `opencode`, `langgraph`, `swe-agent`,
+`aider`, and `codex`. Select one by changing `-a` and add agent-specific kwargs
+only after a native smoke run demonstrates a concrete requirement.
+
+DeepAgent is not a separately registered Harbor agent. Harbor provides the
+generic `langgraph` agent; a DeepAgent graph project should only be added if it
+becomes an explicit benchmark requirement.
+
+## Workers, retries, and resume
+
+- `-n N` controls concurrent trials.
+- Harbor defaults to one attempt per task and zero retries.
+- Use `-k` or `-r` only when a run explicitly requires different values.
+- Resume Harbor's own job state:
 
 ```bash
-scripts/start_opencode_docker_tunnel.sh
+.venv/bin/harbor job resume -p "$JOBS_DIR/<job-name>"
 ```
 
-Этот tunnel не заменяет и не останавливает существующий `127.0.0.1:30002`; он добавляет отдельный listener `172.16.0.1:30003` для контейнеров.
+Do not reconstruct completed-task lists or run a separate collector.
 
-Для GLM 5.2 `PreinstalledOpenCode` регистрирует в OpenCode custom provider:
+## Output contract
 
-- provider id: `glm`;
-- provider package: `@ai-sdk/openai-compatible`;
-- default baseURL для Docker bridge: `http://host.docker.internal:30003/v1`;
-- model: `glm/glm-5.2-fp8`;
-- `interleaved.field = reasoning_content`, чтобы OpenCode читал reasoning из streaming chunk-ов GLM.
-- `agent.build.prompt` с Terminal-Lego system prompt для solution generation.
-
-Внешний `MODEL_NAME=openai/glm-5.2-fp8` остается совместимым алиасом для остальных wrapper-ов, но перед запуском `opencode` агент меняет его на `glm/glm-5.2-fp8`. Это заставляет OpenCode использовать `/v1/chat/completions`, а не OpenAI Responses API.
-
-Если нужен другой endpoint, можно явно передать:
+Harbor artifacts are the only solution-generation output:
 
 ```text
-OPENAI_API_BASE=http://host.docker.internal:30003/v1
+<jobs-dir>/<job-name>/
+  config.json
+  result.json
+  <trial-name>/
+    config.json
+    result.json
+    agent/
+      trajectory.json
+    verifier/
+      reward.txt
 ```
 
-Trajectory для `preinstalled-opencode` дополняется первым step-ом:
-
-```json
-{
-  "source": "system",
-  "message": "..."
-}
-```
-
-Этот system step содержит тот же текст, который записывается в OpenCode config как `agent.build.prompt`. После него идет `source=user` с task instruction, затем `source=agent` шаги из OpenCode stream. Это нужно, чтобы agent run был самодостаточным для просмотра и последующего train-data conversion.
-
-## DeepAgent
-
-Для Deep Agents Code добавлен короткий agent mode:
-
-```bash
-AGENT=deepagent
-```
-
-Он использует официальный способ интеграции Deep Agents с Harbor: Harbor agent
-`langgraph` запускает локальный LangGraph project из
-`solvers/agents/deepagent_project/`. Адаптер `solvers.agents.deepagent:DeepAgent`
-задает project/graph по умолчанию и преобразует итоговые LangGraph messages в
-`agent/trajectory.json` формата ATIF. Полный необработанный результат остается в
-`agent/deepagent-result.json`, а стандартный `langgraph-run.log` сохраняет лог
-исполнения.
-
-Для OpenAI-compatible моделей адаптер также сохраняет нестандартное поле ответа
-`reasoning_content`. LangChain по умолчанию отбрасывает его, поэтому LangGraph
-project записывает `agent/deepagent-reasoning.json`, после чего host adapter
-добавляет reasoning в `Step.reasoning_content` ATIF-траектории. Число reasoning
-tokens сохраняется в `step.metrics.extra.reasoning_tokens`, а сумма - в
-`final_metrics.extra.total_reasoning_tokens`.
-
-Пример для локального OpenAI-compatible GLM endpoint, доступного из task
-container:
-
-```bash
-AGENT=deepagent \
-MODEL_NAME=openai/glm-5.2-fp8 \
-OPENAI_API_BASE=http://host.docker.internal:30301/v1 \
-OPENAI_API_KEY=EMPTY \
-PYTHON_BIN=.venv/bin/python \
-DOCKER_NETWORK_STRATEGY=bridge \
-scripts/generate_solutions.sh ./validated ./runs \
-  --agent-kwarg 'model_kwargs={"timeout":1800}'
-```
-
-Если задан `OPENAI_API_BASE`, адаптер передает его как LangChain `base_url` и
-принудительно использует `/v1/chat/completions` (`use_responses_api=false`).
-Остальные параметры модели можно передавать JSON-объектом в
-`model_kwargs`. Рабочая директория по умолчанию - `/app`.
-
-LangGraph project фиксирует `deepagents-code==0.1.43` и требуемый им prerelease
-`deepagents==0.7.0a7`. Prerelease wheel задан прямой PyPI-ссылкой с SHA-256,
-потому что Harbor запускает `uv` с политикой `--prerelease=if-necessary`, которая
-не разрешает этот транзитивный prerelease. Harbor создает Python venv и
-устанавливает зависимости внутри task container, поэтому первый запуск
-медленнее обычного вызова уже встроенного агента и требует доступа к PyPI из
-контейнера.
-
-System prompt отдельно запрещает чтение `/tests`, `/solution`, verifier/reward
-files и требует создать executable `/logs/artifacts/solve.sh`. Общий
-`materialize_solution.md` по-прежнему добавляется wrapper-ом к инструкции.
-
-## Сбор Заданного Числа Успешных Траекторий
-
-`scripts/collect_solutions.py` запускает solution generation батчами, пока не
-соберет заданное число пригодных траекторий. В квоту входит только уникальная
-задача, для которой одновременно выполнены условия:
-
-- verifier reward не ниже `--reward-threshold`;
-- агент создал `/logs/artifacts/solve.sh`;
-- Harbor сохранил `agent/trajectory.json`.
-
-Упавшая или нерешенная задача записывается в failed manifest и больше не
-запускается. Collector берет следующую задачу из `--tasks-dir`. Передавать лучше
-директорию уже провалидированных задач.
-
-```bash
-.venv/bin/python -m scripts.collect_solutions \
-  --tasks-dir ./validated \
-  --output ./terminal-lego-work/solution-generation/deepagent-glm52-10k \
-  --target-accepted 10000 \
-  --agent deepagent \
-  --model openai/glm-5.2-fp8 \
-  --api-base http://host.docker.internal:30301/v1 \
-  --api-key EMPTY \
-  --n-concurrent 16 \
-  --batch-size 64 \
-  -- \
-  --agent-kwarg 'model_kwargs={"timeout":1800}'
-```
-
-Повтор той же команды возобновляет collection из `collector_state.json`.
-Endpoint, harness, model, task directory и solver arguments должны совпадать с
-первым запуском. Concurrency и batch size при resume можно менять.
-
-Collector пишет:
-
-```text
-<output>/collector_state.json
-<output>/collection_summary.json
-<output>/accepted_trajectories.jsonl
-<output>/failed_trials.jsonl
-<output>/logs/batch-*.log
-<output>/batches/batch-*/...
-```
-
-Батч без успешных решений не считается инфраструктурным сбоем, если verifier
-вернул хотя бы один числовой reward, включая `0`. Если несколько батчей подряд
-не содержат ни одного числового reward, collector завершится со status
-`stalled`. Порог задается `--max-stalled-batches` (по умолчанию `3`). Если пул
-полных задач закончился раньше квоты, status будет `exhausted`. В обоих случаях
-ту же команду можно запустить снова после восстановления endpoint или появления
-новых задач.
-
-## Materialize Solution Prompt
-
-`prompts/solution_generator/materialize_solution.md` добавляется в Harbor job как `extra_instruction_path`.
-
-Его задача - заставить агента в конце работы записать executable, non-interactive, idempotent Bash script:
-
-```text
-/logs/artifacts/solve.sh
-```
-
-Контракт prompt-а:
-
-- первая строка должна быть `#!/usr/bin/env bash`;
-- script должен воспроизводить успешные изменения на свежей копии task image;
-- script может зависеть только от файлов в fresh image и разрешенного network access;
-- script не должен читать `/tests`, `/solution`, `/logs/verifier`, reward files или hidden reference solution;
-- script должен завершаться non-zero on failure;
-- после записи надо выполнить `chmod +x /logs/artifacts/solve.sh`.
-
-Именно наличие этого файла используется при классификации accepted agent runs.
-
-## Harbor Integration
-
-`solvers/run_solutions.py` импортирует Harbor runtime:
-
-```python
-from harbor.job import Job
-from harbor.models.job.config import DatasetConfig, JobConfig, RetryConfig
-from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, VerifierConfig
-```
-
-Если Harbor не установлен, CLI завершится с ошибкой:
-
-```text
-Harbor is required for solution generation. Install dependencies with `pip install -r requirements.txt`.
-```
-
-Текущий `requirements.txt` содержит:
-
-```text
-requests>=2.28.0
-harbor>=0.15.0
-pytest>=8.0.0
-```
-
-## Построение JobConfig
-
-Главная функция: `build_job_config(args)`.
-
-### Task / Dataset Selection
-
-`--tasks-dir` может быть:
-
-- single task directory, если внутри есть `task.toml`;
-- dataset directory, если внутри лежат task directories.
-
-Если это single task, создается:
-
-```python
-TaskConfig(path=tasks_dir)
-```
-
-Если это dataset, создается:
-
-```python
-DatasetConfig(
-    path=tasks_dir,
-    task_names=args.include_task_name or None,
-    exclude_task_names=args.exclude_task_name or None,
-    n_tasks=args.n_tasks,
-)
-```
-
-Поддерживаются:
-
-- `--include-task-name`;
-- `--exclude-task-name`;
-- `--n-tasks`.
-
-### AgentConfig
-
-Agent задается через:
-
-- `--agent`;
-- `--model`;
-- `--api-base`;
-- `--api-key`;
-- `--agent-kwarg KEY=VALUE`;
-- `--agent-env KEY=VALUE`;
-- `--agent-include-logs`;
-- `--agent-exclude-logs`.
-
-`parse_key_value()` парсит `KEY=VALUE`, а значения приводит к типам:
-
-- `true` / `false` -> bool;
-- `none` / `null` -> None;
-- JSON object/list -> `json.loads`;
-- int / float;
-- иначе string.
-
-Для `terminus` и `terminus-2` выставляются defaults:
-
-```python
-parser_name = "json"
-enable_summarize = True
-record_terminal_session = True
-```
-
-Если указаны trajectory flags:
-
-- `--trajectory-raw-content`;
-- `--trajectory-linear-history`;
-- `--trajectory-config-json`;
-
-они собираются в `agent.kwargs["trajectory_config"]`.
-
-Wrapper всегда добавляет:
-
-```text
---trajectory-raw-content
---trajectory-linear-history
-```
-
-Для `preinstalled-opencode` вместо `AgentConfig.name` используется Harbor `AgentConfig.import_path`:
-
-```text
-solvers.agents.preinstalled_opencode:PreinstalledOpenCode
-```
-
-Это позволяет не patch-ить Harbor package и при этом переиспользовать его OpenCode run/trajectory implementation.
-
-### EnvironmentConfig
-
-Environment задается через:
-
-- `--env`, default `docker`;
-- `--force-build`;
-- `--delete / --no-delete`, default `delete=True`;
-- `--extra-docker-compose`;
-- `--environment-kwarg KEY=VALUE`;
-- `--environment-env KEY=VALUE`.
-
-Wrapper при `DOCKER_NETWORK_STRATEGY=bridge` добавляет:
-
-```text
---extra-docker-compose configs/harbor/docker-compose-bridge-network.yaml
-```
-
-Этот compose override задает:
-
-```yaml
-services:
-  main:
-    network_mode: bridge
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
-
-Цель - не плодить отдельную Docker compose network на каждый worker/trial и иметь доступ к host endpoint через `host.docker.internal`.
-
-Если `DOCKER_NETWORK_STRATEGY=compose`, override не добавляется, Harbor использует default compose behavior.
-
-### VerifierConfig
-
-Verifier задается через:
-
-- `--disable-verification`;
-- `--verifier-env KEY=VALUE`;
-- `--verifier-include-logs`;
-- `--verifier-exclude-logs`.
-
-Verifier запускается Harbor-ом после agent run и читает rewards из task tests.
-
-### Retry / Attempts / Timeouts
-
-JobConfig получает:
-
-- `n_attempts`;
-- `n_concurrent_trials`;
-- `RetryConfig(max_retries=args.max_retries)`;
-- `timeout_multiplier`;
-- `agent_timeout_multiplier`;
-- `verifier_timeout_multiplier`;
-- `environment_build_timeout_multiplier`.
-
-Wrapper defaults:
-
-```text
-N_ATTEMPTS=1
-N_CONCURRENT=1
-MAX_RETRIES=0
-```
-
-## Dry Run
-
-`--dry-run-config PATH` не запускает Harbor job. Вместо этого пишет serialized Harbor config:
-
-```bash
-python -m solvers.run_solutions \
-  --tasks-dir ./validated \
-  --dry-run-config ./job_config.json
-```
-
-Это полезно для проверки, какие agents, env kwargs, datasets, tasks и extra instruction paths реально попадут в Harbor.
-
-## Выполнение Job
-
-Основной runtime:
-
-```python
-async def run_job(config):
-    harbor = import_harbor()
-    Job = harbor["Job"]
-    job = await Job.create(config)
-    return await job.run()
-```
-
-После `asyncio.run(run_job(config))` код считает, что Harbor записал результаты в:
-
-```text
-<jobs_dir>/<job_name>/
-```
-
-Дальше запускается post-processing:
-
-```python
-summary = summarize_job(job_dir, args.reward_threshold)
-```
-
-## Docker Cleanup В Wrapper
-
-`scripts/generate_solutions.sh` ставит `trap cleanup EXIT`.
-
-Если `CLEANUP_DOCKER=1`, wrapper:
-
-1. ищет trial directories внутри `<JOBS_DIR>/<JOB_NAME>`;
-2. из имен trial directories строит Docker compose project names;
-3. удаляет containers с matching label `com.docker.compose.project`;
-4. удаляет matching Docker networks.
-
-Это best-effort cleanup: ошибки удаления игнорируются, чтобы wrapper не скрывал основной exit status.
-
-## Classification И Acceptance Logic
-
-`summarize_job(job_dir, reward_threshold)` проходит по всем:
-
-```text
-<job_dir>/*/result.json
-```
-
-Для каждого trial извлекаются:
-
-- `task_name`;
-- `trial_name`;
-- `reward`;
-- `exception_info`;
-- `exception_type`;
-- путь к `agent/trajectory.json`, если есть;
-- путь к `artifacts/logs/artifacts/solve.sh`, если есть.
-
-Reward читается из:
-
-```python
-result["verifier_result"]["rewards"]["reward"]
-```
-
-`reward_from_result()` приводит reward к finite float. `nan`, отсутствующее значение или непарсируемая строка дают `None`.
-
-Trial считается accepted, если:
-
-```text
-reward >= reward_threshold
-and artifacts/logs/artifacts/solve.sh exists
-```
-
-Default threshold:
-
-```text
---reward-threshold 1.0
-```
-
-Отдельный случай:
-
-```text
-reward >= threshold
-solve.sh exists
-exception_type == AgentTimeoutError
-```
-
-Такой trial все равно accepted, но получает:
-
-```json
-{
-  "accepted_with_timeout": true,
-  "original_exception_type": "AgentTimeoutError"
-}
-```
-
-Если reward прошел threshold, но materialized `solve.sh` отсутствует, trial rejected:
-
-```json
-{
-  "rejection_reason": "reward_threshold_met_missing_solve_sh"
-}
-```
-
-Если reward ниже threshold или reward отсутствует, trial rejected без специальной причины.
-
-## Output Artifacts
-
-После job пишутся:
-
-```text
-<jobs_dir>/<job_name>/solution_generation_summary.json
-<jobs_dir>/<job_name>/accepted_trajectories.jsonl
-<jobs_dir>/<job_name>/failed_trials.jsonl
-```
-
-`solution_generation_summary.json` содержит:
-
-- job dir;
-- total trials;
-- accepted trials;
-- failed trials;
-- reward threshold;
-- полный список trial rows;
-- пути к summary/accepted/failed файлам.
-
-`accepted_trajectories.jsonl` содержит только accepted rows. Это основной файл для дальнейшего использования agent runs.
-
-Каждая строка включает:
-
-```json
-{
-  "task_name": "...",
-  "trial_name": "...",
-  "reward": 1.0,
-  "accepted": true,
-  "accepted_with_timeout": false,
-  "original_exception_type": null,
-  "rejection_reason": null,
-  "exception_type": null,
-  "exception_info": null,
-  "result_path": ".../result.json",
-  "trajectory_path": ".../agent/trajectory.json",
-  "materialized_solution_path": ".../artifacts/logs/artifacts/solve.sh"
-}
-```
-
-`failed_trials.jsonl` содержит rejected rows с тем же schema.
-
-## Отличие Reference Solution И Agent Solution
-
-В task directory есть:
-
-```text
-solution/solve.sh
-```
-
-Это reference solution, generated на стадии task generation. Оно используется для Docker validation candidate tasks.
-
-Во время solution generation агент должен решить задачу сам. Для сохранения результата используется:
-
-```text
-<trial>/artifacts/logs/artifacts/solve.sh
-```
-
-Этот файл создается агентом благодаря `prompts/solution_generator/materialize_solution.md`. Именно этот файл считается materialized agent solution.
-
-## Важные Ограничения Текущей Реализации
-
-- `run_solutions.py` не реализует harness logic сам; он делегирует запуск Harbor.
-- Качество и формат trajectory зависят от выбранного Harbor agent.
-- Multi-harness поддержка ограничена тем, какие agents/environments реально поддерживает установленный Harbor.
-- Accepted classification требует не только reward, но и materialized `/logs/artifacts/solve.sh`.
-- `accepted_with_timeout` означает, что verifier reward и solve.sh есть, но Harbor result сохранил `AgentTimeoutError`.
-- Docker cleanup работает по compose project labels и является best-effort.
+Some agents write additional native logs. Terminal-Lego does not create a
+second summary, accepted/failed JSONL files, quota state, or batch state.

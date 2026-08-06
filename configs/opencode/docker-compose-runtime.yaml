@@ -1,4 +1,0 @@
-services:
-  main:
-    volumes:
-      - ${OPENCODE_RUNTIME_DIR:-/home/avzavodov/projects/terminal-lego/configs/opencode/runtime}:/opt/terminal-lego/opencode:ro

@@ -10,6 +10,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any, Callable
 
 
 from generator.contracts import SOQuestion
@@ -50,6 +51,9 @@ class Counter:
     def increment(self):
         self.value += 1
         return self.value
+
+    def reset(self) -> None:
+        self.value = 0
 
 
 progress_counter = Counter()
@@ -113,9 +117,132 @@ def process_question(args: tuple) -> bool:
                 logger.warning("Failed to finish trace for %s: %s", generator.task_name, exc)
 
 
-def main() -> None:
+def configure_generation(
+    *,
+    api_base: str | None,
+    api_key: str | None,
+    model: str | None,
+    instruction_rewrite_mode: str,
+    lossy_instruction_ratio: float,
+) -> None:
+    """Configure the existing generator runtime without changing its logic."""
     global _instruction_rewrite_mode, _lossy_instruction_ratio
 
+    _lossy_instruction_ratio = validate_lossy_ratio(lossy_instruction_ratio)
+    _instruction_rewrite_mode = instruction_rewrite_mode
+    _config["api_base"] = api_base or os.environ.get("OPENAI_API_BASE", DEFAULT_API_BASE)
+    _config["api_key"] = api_key or os.environ.get("OPENAI_API_KEY", "")
+    _config["model"] = model or os.environ.get("MODEL_NAME", DEFAULT_MODEL)
+    if not _config["api_key"]:
+        raise ValueError("No API key provided. Use --api-key or set OPENAI_API_KEY env var.")
+
+
+def run_generation(
+    *,
+    input_path: Path,
+    output_dir: Path,
+    workers: int,
+    start: int = 0,
+    limit: int | None = None,
+    resume: bool = False,
+    trace_dir: Path | None = None,
+    on_generated: Callable[[Path, int], None] | None = None,
+) -> dict[str, Any]:
+    """Generate tasks and notify the caller as soon as each task is complete."""
+    for counter in (progress_counter, error_counter, skip_counter):
+        counter.reset()
+
+    logger.info("Model: %s", _config["model"])
+    logger.info("API base: %s", _config["api_base"])
+    logger.info(
+        "Instruction rewrite: mode=%s lossy_ratio=%.3f",
+        _instruction_rewrite_mode,
+        _lossy_instruction_ratio,
+    )
+
+    with input_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    questions = [q for q in data["questions"] if q.get("accepted_answer")]
+    logger.info(
+        "Found %s questions with accepted answers (of %s total)",
+        len(questions),
+        len(data["questions"]),
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trace_writer = configure_trace_writer(str(trace_dir.resolve()) if trace_dir else None)
+    if trace_writer is not None:
+        logger.info("Generation traces: %s", trace_writer.output_dir)
+
+    task_args, resume_info = _build_task_args(
+        questions,
+        output_dir,
+        start=start,
+        limit=limit,
+        resume=resume,
+    )
+    total_count = len(task_args)
+
+    if resume:
+        logger.info(
+            "Resume enabled: skipped %s existing question ids, next task index is %s",
+            resume_info["skipped_existing_questions"],
+            resume_info["next_task_index"],
+        )
+
+    logger.info("Processing %s questions (start=%s, resume=%s)", total_count, start, resume)
+    start_time = time.time()
+    success_count = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(process_question, task_arg): task_arg
+            for task_arg in task_args
+        }
+        for future in as_completed(futures):
+            try:
+                success = bool(future.result())
+            except Exception as exc:
+                logger.exception("Future exception: %s", exc)
+                continue
+
+            success_count += int(success)
+            if success and on_generated is not None:
+                task_arg = futures[future]
+                task_index = int(task_arg[3])
+                task_dir = Path(task_arg[1]) / f"task_{task_index:05d}"
+                on_generated(task_dir, total_count)
+
+    elapsed = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info("Done! Time: %.1fs", elapsed)
+    logger.info("Success: %s/%s", success_count, total_count)
+    logger.info("Failed: %s, Skipped: %s", error_counter.value, skip_counter.value)
+    logger.info("Token usage: %s", token_tracker.get_summary())
+    logger.info("=" * 60)
+
+    summary = {
+        "total_processed": total_count,
+        "success_count": success_count,
+        "error_count": error_counter.value,
+        "skip_count": skip_counter.value,
+        "resume": resume_info,
+        "elapsed_seconds": elapsed,
+        "model": _config["model"],
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "token_usage": token_tracker.get_summary(),
+        "trace_dir": str(trace_writer.output_dir) if trace_writer is not None else None,
+        "trace_run_id": trace_writer.run_id if trace_writer is not None else None,
+        "instruction_rewrite_mode": _instruction_rewrite_mode,
+        "lossy_instruction_ratio": _lossy_instruction_ratio,
+    }
+    with (output_dir / "generation_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+    return summary
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Terminal-Lego task generator")
     parser.add_argument("--input", "-i", required=True, help="Input JSON file with questions")
     parser.add_argument("--output", "-o", default="./candidates", help="Output directory")
@@ -155,92 +282,25 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        _lossy_instruction_ratio = validate_lossy_ratio(args.lossy_instruction_ratio)
+        configure_generation(
+            api_base=args.api_base,
+            api_key=args.api_key,
+            model=args.model,
+            instruction_rewrite_mode=args.instruction_rewrite_mode,
+            lossy_instruction_ratio=args.lossy_instruction_ratio,
+        )
     except ValueError as exc:
         parser.error(str(exc))
-    _instruction_rewrite_mode = args.instruction_rewrite_mode
 
-    _config["api_base"] = args.api_base or os.environ.get("OPENAI_API_BASE", DEFAULT_API_BASE)
-    _config["api_key"] = args.api_key or os.environ.get("OPENAI_API_KEY", "")
-    _config["model"] = args.model or os.environ.get("MODEL_NAME", DEFAULT_MODEL)
-
-    if not _config["api_key"]:
-        logger.error("No API key provided. Use --api-key or set OPENAI_API_KEY env var.")
-        raise SystemExit(1)
-
-    logger.info("Model: %s", _config["model"])
-    logger.info("API base: %s", _config["api_base"])
-    logger.info(
-        "Instruction rewrite: mode=%s lossy_ratio=%.3f",
-        _instruction_rewrite_mode,
-        _lossy_instruction_ratio,
-    )
-
-    with open(args.input, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-
-    questions = [q for q in data["questions"] if q.get("accepted_answer")]
-    logger.info("Found %s questions with accepted answers (of %s total)", len(questions), len(data["questions"]))
-
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    trace_writer = configure_trace_writer(str(args.trace_dir.resolve()) if args.trace_dir else None)
-    if trace_writer is not None:
-        logger.info("Generation traces: %s", trace_writer.output_dir)
-
-    task_args, resume_info = _build_task_args(
-        questions,
-        output_dir,
+    run_generation(
+        input_path=Path(args.input),
+        output_dir=Path(args.output),
+        workers=args.workers,
         start=args.start,
         limit=args.limit,
         resume=args.resume,
+        trace_dir=args.trace_dir,
     )
-    total_count = len(task_args)
-
-    if args.resume:
-        logger.info(
-            "Resume enabled: skipped %s existing question ids, next task index is %s",
-            resume_info["skipped_existing_questions"],
-            resume_info["next_task_index"],
-        )
-
-    logger.info("Processing %s questions (start=%s, resume=%s)", total_count, args.start, args.resume)
-    start_time = time.time()
-    success_count = 0
-
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = [executor.submit(process_question, arg) for arg in task_args]
-        for future in as_completed(futures):
-            try:
-                success_count += int(bool(future.result()))
-            except Exception as exc:
-                logger.exception("Future exception: %s", exc)
-
-    elapsed = time.time() - start_time
-    logger.info("=" * 60)
-    logger.info("Done! Time: %.1fs", elapsed)
-    logger.info("Success: %s/%s", success_count, total_count)
-    logger.info("Failed: %s, Skipped: %s", error_counter.value, skip_counter.value)
-    logger.info("Token usage: %s", token_tracker.get_summary())
-    logger.info("=" * 60)
-
-    summary = {
-        "total_processed": total_count,
-        "success_count": success_count,
-        "error_count": error_counter.value,
-        "skip_count": skip_counter.value,
-        "resume": resume_info,
-        "elapsed_seconds": elapsed,
-        "model": _config["model"],
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "token_usage": token_tracker.get_summary(),
-        "trace_dir": str(trace_writer.output_dir) if trace_writer is not None else None,
-        "trace_run_id": trace_writer.run_id if trace_writer is not None else None,
-        "instruction_rewrite_mode": _instruction_rewrite_mode,
-        "lossy_instruction_ratio": _lossy_instruction_ratio,
-    }
-    with open(output_dir / "generation_summary.json", "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,27 @@ def test_atomic_counter_increment() -> None:
     assert counter.increment() == 2
 
 
+def test_finalize_validation_writes_report_from_results(tmp_path: Path) -> None:
+    output = tmp_path / "validated"
+    output.mkdir()
+    report = vt.finalize_validation(
+        output,
+        [
+            {"task": "task_00000", "status": "passed", "reward": 1},
+            {"task": "task_00001", "status": "build_failed", "reward": None},
+        ],
+        elapsed_seconds=1.5,
+    )
+
+    assert report["total"] == 2
+    assert report["passed"] == 1
+    assert report["build_failed"] == 1
+    assert json.loads((output / "validation_report.json").read_text())["status_counts"] == {
+        "passed": 1,
+        "build_failed": 1,
+    }
+
+
 def test_load_task_filter_accepts_jsonl_and_plain_text(tmp_path: Path) -> None:
     task_list = tmp_path / "tasks.jsonl"
     task_list.write_text(

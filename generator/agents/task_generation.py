@@ -37,7 +37,7 @@ from generator.text_utils import clean_html
 
 logger = logging.getLogger(__name__)
 
-ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)+")
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/<])/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/?)+")
 
 
 def extract_fenced(response: str, language: str) -> Optional[str]:
@@ -80,7 +80,9 @@ def extract_absolute_paths(instruction: str) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
     for match in ABSOLUTE_PATH_RE.finditer(instruction):
-        path = match.group(0).rstrip("`.,;:)]}")
+        path = match.group(0).rstrip("`'\".,;:)]}")
+        if not path.strip("/*"):
+            continue
         if path and path not in seen:
             seen.add(path)
             paths.append(path)

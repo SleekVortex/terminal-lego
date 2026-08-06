@@ -11,12 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINTS = [
     "generator.task_generator",
     "validator.validate_tasks",
-    "solvers.run_solutions",
     "sources.stackoverflow.prepare_dataset",
-    "scripts.regenerate_dockerfiles",
-    "scripts.repair_failed_tasks",
-    "scripts.diagnose_failed_tasks",
-    "scripts.validation_first_pipeline",
     "scripts.run_task_pipeline",
 ]
 

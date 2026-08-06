@@ -13,10 +13,8 @@ else
 fi
 
 "${PYTHON_BIN}" -m ruff check \
-  configs \
   generator \
   scripts \
-  solvers \
   sources \
   tests \
   validator \

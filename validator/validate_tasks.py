@@ -42,12 +42,21 @@ class AtomicCounter:
             self.value += 1
             return self.value
 
+    def reset(self) -> None:
+        with self.lock:
+            self.value = 0
+
 
 progress = AtomicCounter()
 passed = AtomicCounter()
 failed = AtomicCounter()
 build_failed = AtomicCounter()
 error_count = AtomicCounter()
+
+
+def reset_counters() -> None:
+    for counter in (progress, passed, failed, build_failed, error_count):
+        counter.reset()
 
 
 class TaskValidator:
@@ -199,6 +208,52 @@ def load_task_filter(path: Path | None) -> set[str] | None:
     return tasks
 
 
+def finalize_validation(
+    output_dir: Path,
+    results: list[dict],
+    elapsed_seconds: float,
+) -> dict:
+    """Write the canonical validation report for CLI and streaming callers."""
+    status_counts: dict[str, int] = {}
+    for row in results:
+        status = str(row["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    total = len(results)
+    report = {
+        "total": total,
+        "passed": status_counts.get("passed", 0),
+        "failed": status_counts.get("failed", 0),
+        "build_failed": status_counts.get("build_failed", 0),
+        "errors": status_counts.get("error", 0),
+        "status_counts": status_counts,
+        "elapsed_seconds": elapsed_seconds,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "results": results,
+    }
+
+    logger.info("=" * 60)
+    logger.info("Validation Complete! Time: %.1fs, Total: %s", elapsed_seconds, total)
+    for status, count in sorted(status_counts.items()):
+        logger.info("  %s: %s", status, count)
+    if total > 0:
+        logger.info(
+            "Pass rate: %s/%s (%.1f%%)",
+            report["passed"],
+            total,
+            report["passed"] / total * 100,
+        )
+    logger.info("=" * 60)
+
+    report_path = output_dir / "validation_report.json"
+    report_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Report: %s", report_path)
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Docker Round-Trip Validator")
     parser.add_argument("--input", "-i", required=True, help="Input directory with candidate tasks")
@@ -213,6 +268,7 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     add_output_file_logger(output_dir / "validate_tasks.log")
+    reset_counters()
 
     task_dirs = sorted(d for d in input_dir.iterdir() if d.is_dir() and d.name.startswith("task_"))
     task_filter = load_task_filter(args.task_list)
@@ -238,33 +294,7 @@ def main() -> None:
                 logger.exception("[%s] Unhandled exception: %s", task_dir.name, exc)
                 results.append({"task": task_dir.name, "status": "error", "error": str(exc)})
 
-    elapsed = time.time() - start_time
-    status_counts: dict[str, int] = {}
-    for row in results:
-        status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
-
-    logger.info("=" * 60)
-    logger.info("Validation Complete! Time: %.1fs, Total: %s", elapsed, total)
-    for status, count in sorted(status_counts.items()):
-        logger.info("  %s: %s", status, count)
-    if total > 0:
-        logger.info("Pass rate: %s/%s (%.1f%%)", passed.value, total, passed.value / total * 100)
-    logger.info("=" * 60)
-
-    report = {
-        "total": total,
-        "passed": passed.value,
-        "failed": failed.value,
-        "build_failed": build_failed.value,
-        "errors": error_count.value,
-        "status_counts": status_counts,
-        "elapsed_seconds": elapsed,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "results": results,
-    }
-    report_path = output_dir / "validation_report.json"
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("Report: %s", report_path)
+    finalize_validation(output_dir, results, time.time() - start_time)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,8 @@
 data/
 terminal-lego-work/
 .venv/
-/materialize_solution.md
 *.log
 api_token_usage.json
 __pycache__/
 *.pyc
 .ruff_cache/
-configs/opencode/runtime/
-configs/opencode/*.tar
-configs/opencode/*.tar.gz

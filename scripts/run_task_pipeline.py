@@ -4,7 +4,7 @@
 Production policy:
 1. prepare StackOverflow seed
 2. generate task candidates once
-3. validate candidates with Docker
+3. submit each completed candidate immediately to Docker validation
 4. keep only tasks whose golden solution receives reward == 1
 
 Failed tasks are logged by the validator and skipped. This entrypoint
@@ -19,8 +19,18 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Sequence
+
+from generator import task_generator
+from generator.resume import is_complete_task_dir
+from validator.validate_tasks import (
+    TaskValidator,
+    add_output_file_logger,
+    finalize_validation,
+    reset_counters as reset_validation_counters,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -129,7 +139,7 @@ def run_command(
 def build_summary(args: argparse.Namespace, paths: dict[str, Path], stages: list[dict[str, Any]]) -> dict[str, Any]:
     validation_report = load_json(paths["accepted"] / "validation_report.json")
     return {
-        "mode": "simple",
+        "mode": "streaming",
         "run_dir": str(args.output),
         "input": str(args.input),
         "seed": str(paths["seed"]),
@@ -140,14 +150,149 @@ def build_summary(args: argparse.Namespace, paths: dict[str, Path], stages: list
             "accepted": count_task_dirs(paths["accepted"]),
         },
         "reports": {
+            "generation": str(paths["candidates"] / "generation_summary.json"),
             "validation": str(paths["accepted"] / "validation_report.json"),
             "validate_log": str(paths["accepted"] / "validate_tasks.log"),
         },
         "validation_status_counts": validation_report.get("status_counts", {}),
         "stages": stages,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "policy": "generate_once_validate_accept_reward_1_skip_failed",
+        "policy": "validate_each_candidate_immediately_accept_reward_1_skip_failed",
     }
+
+
+def count_seed_questions(seed_path: Path) -> int:
+    data = load_json(seed_path)
+    return sum(1 for row in data.get("questions", []) if row.get("accepted_answer"))
+
+
+def run_streaming_generation_and_validation(
+    args: argparse.Namespace,
+    paths: dict[str, Path],
+) -> dict[str, Any]:
+    """Overlap unchanged task generation with unchanged Docker validation."""
+    marker_path = paths["state"] / "02_generate_and_validate.json"
+    if args.resume and marker_path.exists():
+        marker = load_json(marker_path)
+        if marker.get("status") == "completed":
+            return {
+                "stage": "generate_and_validate",
+                "status": "skipped",
+                "marker": str(marker_path),
+            }
+
+    paths["accepted"].mkdir(parents=True, exist_ok=True)
+    add_output_file_logger(paths["logs"] / "02_generate_and_validate.log")
+    add_output_file_logger(paths["accepted"] / "validate_tasks.log")
+    reset_validation_counters()
+
+    instruction_rewrite_mode = os.environ.get(
+        "INSTRUCTION_REWRITE_MODE",
+        task_generator.DEFAULT_INSTRUCTION_REWRITE_MODE,
+    )
+    lossy_instruction_ratio = float(
+        os.environ.get(
+            "LOSSY_INSTRUCTION_RATIO",
+            task_generator.DEFAULT_LOSSY_INSTRUCTION_RATIO,
+        )
+    )
+    task_generator.configure_generation(
+        api_base=args.api_base,
+        api_key=args.api_key,
+        model=args.model,
+        instruction_rewrite_mode=instruction_rewrite_mode,
+        lossy_instruction_ratio=lossy_instruction_ratio,
+    )
+
+    expected_total = count_seed_questions(paths["seed"])
+    validator = TaskValidator(paths["accepted"], args.timeout)
+    validation_futures: dict[Future[dict], Path] = {}
+    validation_started_at: float | None = None
+    started_at = time.time()
+
+    try:
+        with ThreadPoolExecutor(max_workers=args.validate_workers) as validation_executor:
+
+            def schedule_validation(task_dir: Path, _generation_total: int) -> None:
+                nonlocal validation_started_at
+                if validation_started_at is None:
+                    validation_started_at = time.time()
+                future = validation_executor.submit(
+                    validator.validate,
+                    task_dir,
+                    expected_total,
+                )
+                validation_futures[future] = task_dir
+
+            if args.resume and paths["candidates"].exists():
+                for task_dir in sorted(paths["candidates"].glob("task_*")):
+                    if task_dir.is_dir() and is_complete_task_dir(task_dir):
+                        schedule_validation(task_dir, expected_total)
+
+            generation_summary = task_generator.run_generation(
+                input_path=paths["seed"],
+                output_dir=paths["candidates"],
+                workers=args.generate_workers,
+                resume=args.resume,
+                on_generated=schedule_validation,
+            )
+            generation_finished_at = time.time()
+
+            validation_results: list[dict[str, Any]] = []
+            for future in as_completed(validation_futures):
+                task_dir = validation_futures[future]
+                try:
+                    validation_results.append(future.result())
+                except Exception as exc:
+                    validation_results.append(
+                        {
+                            "task": task_dir.name,
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    )
+
+        finished_at = time.time()
+        validation_results.sort(key=lambda row: str(row.get("task", "")))
+        validation_elapsed = (
+            finished_at - validation_started_at
+            if validation_started_at is not None
+            else 0.0
+        )
+        validation_report = finalize_validation(
+            paths["accepted"],
+            validation_results,
+            validation_elapsed,
+        )
+        marker = {
+            "stage": "generate_and_validate",
+            "status": "completed",
+            "elapsed_seconds": round(finished_at - started_at, 3),
+            "generation_elapsed_seconds": round(
+                generation_finished_at - started_at,
+                3,
+            ),
+            "validation_elapsed_seconds": round(validation_elapsed, 3),
+            "generate_workers": args.generate_workers,
+            "validate_workers": args.validate_workers,
+            "generation": generation_summary,
+            "validation_status_counts": validation_report["status_counts"],
+            "log": str(paths["logs"] / "02_generate_and_validate.log"),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        write_json(marker_path, marker)
+        return marker
+    except Exception as exc:
+        marker = {
+            "stage": "generate_and_validate",
+            "status": "failed",
+            "elapsed_seconds": round(time.time() - started_at, 3),
+            "error": str(exc),
+            "log": str(paths["logs"] / "02_generate_and_validate.log"),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        write_json(marker_path, marker)
+        raise
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -174,17 +319,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--sort-by-score", action=argparse.BooleanOptionalAction, default=True)
 
-    # Compatibility no-ops for commands written against the experimental pipeline.
-    parser.add_argument("--mode", choices=("simple", "staged", "streaming"), default="simple")
-    parser.add_argument("--dockerfile-workers", type=int, default=0)
-    parser.add_argument("--repair-workers", type=int, default=0)
-    parser.add_argument("--task-workers", type=int, default=None)
-    parser.add_argument("--llm-concurrency", type=int, default=None)
-    parser.add_argument("--docker-concurrency", type=int, default=None)
-    parser.add_argument("--existing-candidates-only", action="store_true")
-    parser.add_argument("--repair-max-attempts", type=int, default=0)
-    parser.add_argument("--skip-dockerfile-regeneration", action="store_true")
-    parser.add_argument("--skip-repair", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -194,9 +328,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     paths = build_paths(run_dir)
     for path in (run_dir, paths["logs"], paths["state"]):
         path.mkdir(parents=True, exist_ok=True)
-
-    if args.existing_candidates_only:
-        raise SystemExit("--existing-candidates-only is not supported by the simple pipeline")
 
     py = args.python_bin
     stages: list[dict[str, Any]] = []
@@ -215,41 +346,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     append_prepare_filters(args, prepare)
     stages.append(run_command("prepare_seed", prepare, paths["logs"] / "01_prepare_seed.log", paths["state"] / "01_prepare_seed.json", args.resume))
 
-    generate = [
-        py,
-        "-m",
-        "generator.task_generator",
-        "--input",
-        str(paths["seed"]),
-        "--output",
-        str(paths["candidates"]),
-        "--workers",
-        str(args.generate_workers),
-        "--api-key",
-        args.api_key,
-    ]
-    if args.api_base:
-        generate.extend(["--api-base", args.api_base])
-    if args.model:
-        generate.extend(["--model", args.model])
-    if args.resume:
-        generate.append("--resume")
-    stages.append(run_command("generate_candidates", generate, paths["logs"] / "02_generate_candidates.log", paths["state"] / "02_generate_candidates.json", args.resume))
-
-    validate = [
-        py,
-        "-m",
-        "validator.validate_tasks",
-        "--input",
-        str(paths["candidates"]),
-        "--output",
-        str(paths["accepted"]),
-        "--workers",
-        str(args.validate_workers),
-        "--timeout",
-        str(args.timeout),
-    ]
-    stages.append(run_command("validate_candidates", validate, paths["logs"] / "03_validate_candidates.log", paths["state"] / "03_validate_candidates.json", args.resume))
+    stages.append(run_streaming_generation_and_validation(args, paths))
 
     summary = build_summary(args, paths, stages)
     write_json(run_dir / "pipeline_summary.json", summary)

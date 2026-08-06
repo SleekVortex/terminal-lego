@@ -231,13 +231,17 @@ def test_instruction_style_selection_is_deterministic() -> None:
 
 def test_extract_absolute_paths_preserves_order_and_uniqueness() -> None:
     instruction = (
-        "Read `/app/task_file/input/data.csv`, write /app/task_file/output/result.json, "
-        "then inspect /app/task_file/input/data.csv."
+        "Read `/app/task_file/input/data.csv`, write '/app/task_file/output/result.json', "
+        "then inspect /app/task_file/input/data.csv and keep artifacts in '/app/task_file/output/'. "
+        "Do not mistake https://localhost:8080/api/test, </div>, or /* for filesystem paths. "
+        "Also verify '/SHASUMS256.txt'."
     )
 
     assert extract_absolute_paths(instruction) == [
         "/app/task_file/input/data.csv",
         "/app/task_file/output/result.json",
+        "/app/task_file/output/",
+        "/SHASUMS256.txt",
     ]
 
 
@@ -811,3 +815,82 @@ def test_process_question_updates_counters(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert cli.process_question((make_question().__dict__, tmp_path, 1, 1)) is True
     assert cli.progress_counter.value == before + 1
+
+
+def test_run_generation_notifies_before_all_tasks_finish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from threading import Event
+
+    seed = tmp_path / "seed.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "questions": [
+                    {"question_id": 1, "accepted_answer": {"body": "a"}},
+                    {"question_id": 2, "accepted_answer": {"body": "b"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    first_callback = Event()
+    callback_paths: list[Path] = []
+
+    def fake_process_question(task_args: tuple) -> bool:
+        if task_args[3] == 1:
+            assert first_callback.wait(timeout=2)
+        return True
+
+    def on_generated(task_dir: Path, total: int) -> None:
+        callback_paths.append(task_dir)
+        assert total == 2
+        first_callback.set()
+
+    monkeypatch.setattr(cli, "process_question", fake_process_question)
+    summary = cli.run_generation(
+        input_path=seed,
+        output_dir=tmp_path / "candidates",
+        workers=2,
+        on_generated=on_generated,
+    )
+
+    assert summary["success_count"] == 2
+    assert {path.name for path in callback_paths} == {"task_00000", "task_00001"}
+
+
+def test_run_generation_preserves_per_task_exception_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seed = tmp_path / "seed.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "questions": [
+                    {"question_id": 1, "accepted_answer": {"body": "a"}},
+                    {"question_id": 2, "accepted_answer": {"body": "b"}},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    callback_paths: list[Path] = []
+
+    def fake_process_question(task_args: tuple) -> bool:
+        if task_args[3] == 0:
+            raise RuntimeError("one broken task")
+        return True
+
+    monkeypatch.setattr(cli, "process_question", fake_process_question)
+    summary = cli.run_generation(
+        input_path=seed,
+        output_dir=tmp_path / "candidates",
+        workers=2,
+        on_generated=lambda task_dir, _total: callback_paths.append(task_dir),
+    )
+
+    assert summary["success_count"] == 1
+    assert summary["error_count"] == 0
+    assert [path.name for path in callback_paths] == ["task_00001"]
